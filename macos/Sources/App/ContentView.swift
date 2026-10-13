@@ -37,7 +37,7 @@ struct ContentView: View {
             }
             ToolbarItemGroup(placement: .primaryAction) {
                 Text(model.cpuText)
-                    .font(.callout.monospacedDigit())
+                    .appFont(.callout, monospacedDigit: true)
                     .foregroundStyle(.secondary)
                     .accessibilityLabel("Processor use")
                     .accessibilityValue(model.cpuText)
@@ -124,7 +124,7 @@ struct RunBar: View {
                     .accessibilityLabel("Status")
                     .accessibilityValue(model.overallText)
                 Spacer()
-                Text(model.etaText).font(.callout.monospacedDigit()).foregroundStyle(.secondary)
+                Text(model.etaText).appFont(.callout, monospacedDigit: true).foregroundStyle(.secondary)
                     .accessibilityLabel("Time")
                     .accessibilityValue(model.etaText)
             }
@@ -163,7 +163,7 @@ struct RunBar: View {
                         .disabled(model.runState != .idle)
                         .help("Any time: 04:30, 4:30 pm, 0430, 4pm")
                         .accessibilityLabel("Start time")
-                    Text(model.scheduleHint).font(.callout).foregroundStyle(.secondary)
+                    Text(model.scheduleHint).appFont(.callout).foregroundStyle(.secondary)
                         .accessibilityLabel("Schedule")
                         .accessibilityValue(model.scheduleHint)
                     Spacer()
@@ -197,7 +197,7 @@ struct LogView: View {
                     LazyVStack(alignment: .leading, spacing: 2) {
                         ForEach(model.log) { line in
                             Text("[\(line.time)] \(line.text)")
-                                .font(.system(.callout, design: .monospaced))
+                                .appFont(.callout, design: .monospaced)
                                 .foregroundStyle(.secondary)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .id(line.id)

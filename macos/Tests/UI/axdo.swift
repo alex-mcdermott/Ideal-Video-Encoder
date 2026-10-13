@@ -69,13 +69,16 @@ func key(_ code: CGKeyCode, flags: CGEventFlags = []) {
 switch args[2] {
 case "dump":
     func walk(_ e: AXUIElement, _ d: Int) {
-        let role = str(attr(e, kAXRoleAttribute)), desc = str(attr(e, kAXDescriptionAttribute))
+        let role = str(attr(e, kAXRoleAttribute)) + { let sr = str(attr(e, kAXSubroleAttribute)); return sr.isEmpty ? "" : "/" + sr }()
+        let desc = str(attr(e, kAXDescriptionAttribute))
+        let help = str(attr(e, kAXHelpAttribute))
         let title = str(attr(e, kAXTitleAttribute)), val = str(attr(e, kAXValueAttribute))
         let enabled = (attr(e, kAXEnabledAttribute) as? Bool) ?? true
         var line = String(repeating: "  ", count: d) + role
         if !title.isEmpty { line += " title=\"\(title)\"" }
         if !desc.isEmpty { line += " desc=\"\(desc)\"" }
         if !val.isEmpty { line += " value=\"\(val.prefix(70))\"" }
+        if desc.isEmpty && title.isEmpty && !help.isEmpty { line += " help=\"\(help.prefix(50))\"" }
         if !enabled { line += " DISABLED" }
         print(line)
         for c in children(e) { walk(c, d + 1) }

@@ -56,7 +56,7 @@ struct QueueView: View {
                 Spacer()
                 if model.isLocked {
                     Label("Queue locked while \(model.runState == .analysing ? "analysing" : "converting")", systemImage: "lock.fill")
-                        .font(.callout).foregroundStyle(.secondary)
+                        .appFont(.callout).foregroundStyle(.secondary)
                 }
             }
             .padding(6)
@@ -72,10 +72,10 @@ struct QueueRow: View {
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(item.name).font(.headline).lineLimit(1).truncationMode(.middle)
-                Text(item.detail).font(.callout).foregroundStyle(.secondary).lineLimit(2).truncationMode(.middle)
+                Text(item.name).appFont(.headline).lineLimit(1).truncationMode(.middle)
+                Text(item.detail).appFont(.callout).foregroundStyle(.secondary).lineLimit(2).truncationMode(.middle)
                 if !item.note.isEmpty {
-                    Text(item.note).font(.callout)
+                    Text(item.note).appFont(.callout)
                         .foregroundStyle(isSelected ? AnyShapeStyle(.primary) : AnyShapeStyle(Color.accentColor))
                         .lineLimit(1).truncationMode(.tail)
                 }
@@ -110,7 +110,7 @@ struct StatusBadge: View {
 
     var body: some View {
         Text(text)
-            .font(.callout.monospacedDigit())
+            .appFont(.callout, monospacedDigit: true)
             .padding(.horizontal, 9).padding(.vertical, 3)
             .foregroundStyle(state == .queued || state == .waiting ? Color.secondary : color)
             .background(color.opacity(0.15), in: Capsule())

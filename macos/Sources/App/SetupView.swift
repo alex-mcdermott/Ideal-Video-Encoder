@@ -22,7 +22,7 @@ struct SetupView: View {
                     .foregroundStyle(model.toolReport?.isComplete == true ? .green : .orange)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading) {
-                    Text("Tools Setup").font(.title2.bold())
+                    Text("Tools Setup").appFont(.title2, weight: .bold)
                     Text("Ideal Video Encoder uses ffmpeg, ffprobe and ExifTool from Homebrew.").foregroundStyle(.secondary)
                 }
             }
@@ -62,11 +62,11 @@ struct SetupView: View {
                         VStack(alignment: .leading, spacing: 12) {
                             ForEach(r.problems) { p in
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text(p.title).font(.headline)
+                                    Text(p.title).appFont(.headline)
                                     Text(p.explanation).fixedSize(horizontal: false, vertical: true)
                                     HStack(alignment: .top) {
                                         Text(p.fix)
-                                            .font(.system(.callout, design: .monospaced))
+                                            .appFont(.callout, design: .monospaced)
                                             .textSelection(.enabled)
                                             .padding(8)
                                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -91,7 +91,7 @@ struct SetupView: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         Text(installer.output.joined(separator: "\n"))
-                            .font(.system(.callout, design: .monospaced))
+                            .appFont(.callout, design: .monospaced)
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(8)

@@ -28,7 +28,7 @@ struct FieldError: View {
     var body: some View {
         if let text {
             Label(text, systemImage: "exclamationmark.circle.fill")
-                .font(.callout)
+                .appFont(.callout)
                 .foregroundStyle(.red)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityLabel("Problem: \(text)")
@@ -40,7 +40,7 @@ struct Caption: View {
     let text: String
     init(_ text: String) { self.text = text }
     var body: some View {
-        Text(text).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        Text(text).appFont(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -83,9 +83,9 @@ struct LookSection: View {
                 Slider(value: Binding(get: { model.exposure }, set: { model.exposure = Fmt.round($0, 1) }), in: -2...2, step: 0.1) {
                     Text("Exposure")
                 } minimumValueLabel: {
-                    Text("−2").font(.caption).accessibilityLabel("Minus 2 stops")
+                    Text("−2").appFont(.caption).accessibilityLabel("Minus 2 stops")
                 } maximumValueLabel: {
-                    Text("+2").font(.caption).accessibilityLabel("Plus 2 stops")
+                    Text("+2").appFont(.caption).accessibilityLabel("Plus 2 stops")
                 }
                     .labelsHidden()
                     .accessibilityValue(Fmt.signed1(model.exposure) + " stops")
@@ -265,9 +265,9 @@ struct OutputSection: View {
                 FieldError(text: OutputPaths.validateSubfolder(model.settings.subfolder))
             }
             VStack(alignment: .leading, spacing: 2) {
-                Text("Saves to").font(.callout).foregroundStyle(.secondary)
+                Text("Saves to").appFont(.callout).foregroundStyle(.secondary)
                 Text(model.savesTo)
-                    .font(.callout)
+                    .appFont(.callout)
                     .textSelection(.enabled)
                     .lineLimit(3)
                     .truncationMode(.middle)
@@ -282,7 +282,7 @@ struct OutputSection: View {
                     .accessibilityLabel("Write CSV log")
                 HStack {
                     Text(model.settings.csvPath)
-                        .font(.callout).foregroundStyle(.secondary)
+                        .appFont(.callout).foregroundStyle(.secondary)
                         .lineLimit(1).truncationMode(.middle)
                         .opacity(model.settings.csvEnabled ? 1 : 0.5)
                         .help(model.settings.csvPath)

@@ -11,6 +11,12 @@ import AppKit
 @MainActor
 enum TestHooks {
     static func start() {
+        // IVE_APPEARANCE=dark|light forces the app's appearance (what the system setting does to every app)
+        switch ProcessInfo.processInfo.environment["IVE_APPEARANCE"] {
+        case "dark": NSApp.appearance = NSAppearance(named: .darkAqua)
+        case "light": NSApp.appearance = NSAppearance(named: .aqua)
+        default: break
+        }
         guard let dir = ProcessInfo.processInfo.environment["IVE_SNAPSHOT_DIR"], !dir.isEmpty else { return }
         Task { @MainActor in
             while true {

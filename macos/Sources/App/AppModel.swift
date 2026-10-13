@@ -73,11 +73,24 @@ final class AppModel {
     var setupRequests = 0
     var cpuText = ""
     var cancelling = false
+    /// View > Bigger / Smaller (index into TextSize.steps); a per-Mac preference, not in settings.json.
+    /// IVE_TEXT_SIZE (0-3) overrides it for tests.
+    var textSizeStep: Int = {
+        if let v = ProcessInfo.processInfo.environment["IVE_TEXT_SIZE"].flatMap(Int.init) { return min(max(v, 0), TextSize.steps.count - 1) }
+        return min(max(UserDefaults.standard.integer(forKey: TextSize.key), 0), TextSize.steps.count - 1)
+    }() {
+        didSet { if ProcessInfo.processInfo.environment["IVE_TEXT_SIZE"] == nil { UserDefaults.standard.set(textSizeStep, forKey: TextSize.key) } }
+    }
+    var textScale: CGFloat { TextSize.steps[textSizeStep] }
     let analysis = AnalysisModel()
     let preview = PreviewModel()
 
     @ObservationIgnored let store: SettingsStore
+    /// Consumes worker events until the worker finishes; never cancelled itself, so the worker's last
+    /// events (Cancelled status, log, summary) still arrive after Cancel.
     @ObservationIgnored private var workerTask: Task<Void, Never>?
+    /// The worker; cancelling it kills ffmpeg and stops the queue.
+    @ObservationIgnored private var workerRun: Task<Void, Never>?
     @ObservationIgnored private var saveTask: Task<Void, Never>?
     @ObservationIgnored private var tickTask: Task<Void, Never>?
     @ObservationIgnored private let cpu = CPUMonitor()
@@ -312,10 +325,9 @@ final class AppModel {
             await worker.run(jobs: jobs, options: opt) { cont.yield($0) }
             cont.finish()
         }
+        workerRun = run
         workerTask = Task { [weak self] in
-            await withTaskCancellationHandler {
-                for await e in stream { self?.handle(e) }
-            } onCancel: { run.cancel() }
+            for await e in stream { self?.handle(e) }
             self?.completeRun()
         }
     }
@@ -347,6 +359,7 @@ final class AppModel {
     /// `Complete-Run`: anything left waiting goes back to Queued.
     private func completeRun() {
         workerTask = nil
+        workerRun = nil
         for it in items where it.state == .waiting || it.state == .active {
             it.status = "Queued"; it.state = .queued; it.progress = 0; it.detail = it.info
         }
@@ -365,7 +378,7 @@ final class AppModel {
             cancelling = true
             overallText = "Cancelling"
             appendLog("Cancelling the queue...")
-            workerTask?.cancel()
+            workerRun?.cancel()
         case .analysing:
             cancelling = true
             overallText = "Cancelling"
@@ -377,7 +390,7 @@ final class AppModel {
 
     /// Stops any run and waits for ffmpeg to be killed and partial files removed (used when quitting).
     func stopForQuit() async {
-        workerTask?.cancel()
+        workerRun?.cancel()
         analysis.cancel()
         while workerTask != nil || analysis.isRunning { try? await Task.sleep(for: .milliseconds(50)) }
         saveSettings()

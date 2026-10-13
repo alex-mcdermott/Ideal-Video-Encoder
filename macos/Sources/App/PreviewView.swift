@@ -222,9 +222,9 @@ struct PreviewPane: View {
                 } else {
                     VStack(spacing: 8) {
                         Image(systemName: "play.rectangle").font(.system(size: 40)).foregroundStyle(.white.opacity(0.8))
-                        Text("Live preview").font(.title3.weight(.semibold)).foregroundStyle(.white.opacity(0.9))
+                        Text("Live preview").appFont(.title3, weight: .semibold).foregroundStyle(.white.opacity(0.9))
                         Text("Select a clip and press Preview. Exposure, LUT and trim changes apply instantly.")
-                            .font(.callout).foregroundStyle(.white.opacity(0.6)).multilineTextAlignment(.center)
+                            .appFont(.callout).foregroundStyle(.white.opacity(0.6)).multilineTextAlignment(.center)
                     }
                     .padding()
                     .accessibilityElement(children: .combine)
@@ -254,12 +254,12 @@ struct PreviewPane: View {
                     .help("Stop the preview")
                     .accessibilityLabel("Stop preview")
                 if preview.isActive {
-                    Text(preview.timeText).font(.callout.monospacedDigit()).foregroundStyle(.secondary)
+                    Text(preview.timeText).appFont(.callout, monospacedDigit: true).foregroundStyle(.secondary)
                         .accessibilityLabel("Playback position")
                         .accessibilityValue(preview.timeText)
                 }
                 Text(preview.nowPlaying.map { $0 + (preview.isProxy ? "  (proxy)" : "") } ?? "")
-                    .font(.callout).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                    .appFont(.callout).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                     .accessibilityLabel("Now previewing")
                     .accessibilityValue(preview.nowPlaying ?? "nothing")
                 Spacer()

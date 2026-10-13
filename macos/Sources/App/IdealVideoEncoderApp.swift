@@ -15,6 +15,7 @@ struct IdealVideoEncoderApp: App {
         Window("Ideal Video Encoder", id: "main") {
             ContentView()
                 .environment(delegate.model)
+                .textSizeRoot(delegate.model.textScale)
         }
         .defaultSize(width: 1280, height: 820)
         .commands {
@@ -40,6 +41,18 @@ struct IdealVideoEncoderApp: App {
                 Button("Clear Queue") { delegate.model.clear() }
                     .disabled(delegate.model.isLocked || delegate.model.items.isEmpty)
             }
+            CommandGroup(after: .toolbar) {
+                Divider()
+                Button("Bigger") { delegate.model.textSizeStep = min(delegate.model.textSizeStep + 1, TextSize.steps.count - 1) }
+                    .keyboardShortcut("+")
+                    .disabled(delegate.model.textSizeStep == TextSize.steps.count - 1)
+                Button("Smaller") { delegate.model.textSizeStep = max(delegate.model.textSizeStep - 1, 0) }
+                    .keyboardShortcut("-")
+                    .disabled(delegate.model.textSizeStep == 0)
+                Button("Actual Size") { delegate.model.textSizeStep = 0 }
+                    .keyboardShortcut("0")
+                    .disabled(delegate.model.textSizeStep == 0)
+            }
             CommandGroup(after: .appSettings) {
                 Button("Tools Setup…") {
                     if delegate.model.showSetup { delegate.model.setupRequests += 1 } else { delegate.model.showSetup = true }
@@ -50,6 +63,7 @@ struct IdealVideoEncoderApp: App {
         Window("Tools Setup", id: "setup") {
             SetupView()
                 .environment(delegate.model)
+                .textSizeRoot(delegate.model.textScale)
         }
         .windowResizability(.contentSize)
         .defaultPosition(.center)
@@ -57,6 +71,7 @@ struct IdealVideoEncoderApp: App {
         Settings {
             ToolSettingsView()
                 .environment(delegate.model)
+                .textSizeRoot(delegate.model.textScale)
         }
     }
 }

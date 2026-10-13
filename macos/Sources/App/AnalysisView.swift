@@ -16,7 +16,9 @@ final class AnalysisModel {
     /// Latest results, by path (not yet applied)
     var results: [String: ClipOverride] = [:]
     var suggestion: AnalysisSuggestion?
+    /// Event consumer (not cancelled, so the worker's final events arrive) and the worker itself.
     @ObservationIgnored private var task: Task<Void, Never>?
+    @ObservationIgnored private var run: Task<Void, Never>?
 
     static let targets = [(93, "High (VMAF 93)"), (95, "Transparent (VMAF 95)"), (97, "Archival (VMAF 97)")]
 
@@ -63,10 +65,9 @@ final class AnalysisModel {
             _ = await worker.run(jobs: jobs, options: opt) { cont.yield($0) }
             cont.finish()
         }
+        self.run = run
         task = Task { [weak self] in
-            await withTaskCancellationHandler {
-                for await e in stream { self?.handle(e) }
-            } onCancel: { run.cancel() }
+            for await e in stream { self?.handle(e) }
             self?.complete()
         }
     }
@@ -96,6 +97,7 @@ final class AnalysisModel {
 
     private func complete() {
         task = nil
+        run = nil
         isRunning = false
         for it in items where it.state == .waiting || it.state == .active {
             it.status = "Not analysed"; it.state = .cancelled; it.progress = 0
@@ -104,7 +106,7 @@ final class AnalysisModel {
         app?.runState = .idle
     }
 
-    func cancel() { task?.cancel() }
+    func cancel() { run?.cancel() }
 
     var summaryText: String {
         guard let s = suggestion else { return "" }
@@ -149,7 +151,7 @@ struct AnalysisView: View {
         VStack(spacing: 8) {
             HStack(alignment: .center, spacing: 10) {
                 Text("Analyses each clip on its own (the selected clips, or every clip from the arrow menu): short sample encodes with your current look and grain settings, scored against the source with VMAF, give each clip its own CRF and bitrate cap. Several minutes per 6K clip.")
-                    .font(.callout).foregroundStyle(.secondary)
+                    .appFont(.callout).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 4)
                 Picker("Analysis quality target", selection: $bana.target) {
@@ -159,22 +161,28 @@ struct AnalysisView: View {
                 .fixedSize()
                 .help("Quality target. VMAF 100 = indistinguishable from the source")
                 .disabled(model.runState != .idle)
-                Menu {
-                    Button("Analyse all clips") { ana.start(all: true) }
-                    Button("Analyse selected clips") { ana.start(all: false) }
-                        .disabled(model.selection.isEmpty)
-                } label: {
-                    Label(ana.primaryLabel, systemImage: "chart.xyaxis.line")
-                } primaryAction: {
-                    ana.start(all: false)
+                // Split button: the main part analyses the selection, the arrow offers both choices
+                HStack(spacing: 1) {
+                    Button { ana.start(all: false) } label: {
+                        Label(ana.primaryLabel, systemImage: "chart.xyaxis.line")
+                    }
+                    .help("Analyse the selected clips (all clips if none are selected)")
+                    Menu {
+                        Button("Analyse all clips") { ana.start(all: true) }
+                        Button("Analyse selected clips") { ana.start(all: false) }
+                            .disabled(model.selection.isEmpty)
+                    } label: {
+                        Image(systemName: "chevron.down")
+                    }
+                    .menuStyle(.button)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .help("More analysis options")
+                    .accessibilityLabel("More analysis options")
                 }
-                .menuStyle(.button)
                 .buttonStyle(.borderedProminent)
                 .fixedSize()
                 .disabled(model.runState != .idle || model.items.isEmpty)
-                .help("Analyse the selected clips; the arrow offers all clips")
-                .accessibilityLabel(ana.primaryLabel)
-                .accessibilityHint("More analysis options are in the menu")
             }
 
             List {
@@ -219,8 +227,8 @@ struct AnalysisRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(item.name).font(.headline).lineLimit(1).truncationMode(.middle)
-                Text(item.detail).font(.callout).foregroundStyle(.secondary)
+                Text(item.name).appFont(.headline).lineLimit(1).truncationMode(.middle)
+                Text(item.detail).appFont(.callout).foregroundStyle(.secondary)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
                 if item.state == .active {
