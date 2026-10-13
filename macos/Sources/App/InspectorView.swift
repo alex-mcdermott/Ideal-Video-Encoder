@@ -53,6 +53,7 @@ struct LookSection: View {
         @Bindable var model = model
         Section("Look") {
             Toggle("Apply LUT", isOn: $model.settings.lutEnabled)
+                .accessibilityLabel("Apply LUT")
                 .help("Apply a 3D LUT (.cube) after the exposure adjustment")
             HStack {
                 Text(model.settings.lutPath.isEmpty ? "No LUT selected" : (model.settings.lutPath as NSString).lastPathComponent)
@@ -81,9 +82,12 @@ struct LookSection: View {
                 }
                 Slider(value: Binding(get: { model.exposure }, set: { model.exposure = Fmt.round($0, 1) }), in: -2...2, step: 0.1) {
                     Text("Exposure")
-                } minimumValueLabel: { Text("−2").font(.caption) } maximumValueLabel: { Text("+2").font(.caption) }
+                } minimumValueLabel: {
+                    Text("−2").font(.caption).accessibilityLabel("Minus 2 stops")
+                } maximumValueLabel: {
+                    Text("+2").font(.caption).accessibilityLabel("Plus 2 stops")
+                }
                     .labelsHidden()
-                    .accessibilityLabel("Exposure")
                     .accessibilityValue(Fmt.signed1(model.exposure) + " stops")
                     .onChange(of: model.exposure) { _, _ in model.preview.requestUpdate() }
                 Caption("Stops, applied before the LUT using the F‑Log2 curve.")
@@ -119,6 +123,7 @@ struct EncodingSection: View {
                 Picker("Codec", selection: $model.settings.codec) {
                     ForEach(Codec.allCases) { Text($0.menuName).tag($0) }
                 }
+                .accessibilityLabel("Codec")
                 Caption(model.settings.codec == .av1
                         ? "Smaller files; needs a newer device to play. Saves .MP4."
                         : "Plays almost everywhere, including all Apple devices. Saves .MOV.")
@@ -129,13 +134,12 @@ struct EncodingSection: View {
             VStack(alignment: .leading, spacing: 4) {
                 LabeledContent("Quality (CRF)") {
                     HStack(spacing: 12) {
-                        TextField("CRF", text: Binding(get: { model.crfText }, set: { model.crfText = $0 }))
+                        TextField("Quality (CRF)", text: Binding(get: { model.crfText }, set: { model.crfText = $0 }))
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 52)
                             .multilineTextAlignment(.center)
                             .labelsHidden()
                             .disabled(model.settings.autoCrf)
-                            .accessibilityLabel("Quality, CRF")
                         Toggle("Auto", isOn: $model.settings.autoCrf)
                             .toggleStyle(.checkbox)
                             .accessibilityLabel("Automatic CRF")
@@ -164,13 +168,13 @@ struct EncodingSection: View {
             }
             VStack(alignment: .leading, spacing: 4) {
                 Toggle("Bitrate cap (constrained VBR)", isOn: $model.settings.vbrEnabled)
+                    .accessibilityLabel("Bitrate cap")
                 HStack {
-                    TextField("Max rate", text: $model.settings.maxRate)
+                    TextField("Maximum bitrate, Mbps", text: $model.settings.maxRate)
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 64)
                         .multilineTextAlignment(.center)
                         .labelsHidden()
-                        .accessibilityLabel("Maximum bitrate in megabits per second")
                     Text("Mbps max").foregroundStyle(.secondary)
                 }
                 .disabled(!model.settings.vbrEnabled)
@@ -197,16 +201,14 @@ struct TrimSection: View {
         @Bindable var model = model
         Section("Trim") {
             HStack {
-                TextField("Start", text: $model.trimStart, prompt: Text("Start (s or mm:ss)"))
+                TextField("Trim start", text: $model.trimStart, prompt: Text("Start (s or mm:ss)"))
                     .textFieldStyle(.roundedBorder)
                     .labelsHidden()
-                    .accessibilityLabel("Trim start")
                     .onSubmit { model.preview.requestUpdate() }
                 Text("–").foregroundStyle(.secondary).accessibilityHidden(true)
-                TextField("End", text: $model.trimEnd, prompt: Text("End (s or mm:ss)"))
+                TextField("Trim end", text: $model.trimEnd, prompt: Text("End (s or mm:ss)"))
                     .textFieldStyle(.roundedBorder)
                     .labelsHidden()
-                    .accessibilityLabel("Trim end")
                     .onSubmit { model.preview.requestUpdate() }
             }
             .onChange(of: model.trimStart) { _, _ in model.preview.requestUpdate() }
@@ -232,10 +234,9 @@ struct OutputSection: View {
             .pickerStyle(.radioGroup)
             if model.settings.outputMode == .custom {
                 HStack {
-                    TextField("Folder", text: $model.settings.outputFolder, prompt: Text("Choose a folder"))
+                    TextField("Output folder", text: $model.settings.outputFolder, prompt: Text("Choose a folder"))
                         .textFieldStyle(.roundedBorder)
                         .labelsHidden()
-                        .accessibilityLabel("Output folder")
                     Button("Choose…") { model.chooseOutputFolder() }
                         .accessibilityLabel("Choose output folder")
                 }
@@ -246,7 +247,6 @@ struct OutputSection: View {
                 TextField("Subfolder", text: $model.settings.subfolder, prompt: Text("None (save directly in the folder)"))
                     .textFieldStyle(.roundedBorder)
                     .labelsHidden()
-                    .accessibilityLabel("Subfolder")
                 FieldError(text: OutputPaths.validateSubfolder(model.settings.subfolder))
             }
             VStack(alignment: .leading, spacing: 2) {
@@ -258,11 +258,13 @@ struct OutputSection: View {
                     .truncationMode(.middle)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            .accessibilityElement(children: .combine)
+            .accessibilityElement(children: .ignore)
+            .accessibilityAddTraits(.isStaticText)
             .accessibilityLabel("Saves to")
             .accessibilityValue(model.savesTo)
             VStack(alignment: .leading, spacing: 4) {
                 Toggle("Write CSV log", isOn: $model.settings.csvEnabled)
+                    .accessibilityLabel("Write CSV log")
                 HStack {
                     Text(model.settings.csvPath)
                         .font(.callout).foregroundStyle(.secondary)

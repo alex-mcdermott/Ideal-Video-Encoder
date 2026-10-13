@@ -73,7 +73,7 @@ struct ContentView: View {
             Button("OK") { model.warning = nil }
         } message: { w in Text(w.text) }
         .sheet(isPresented: $model.showSetup) { SetupView() }
-        .task { await model.checkTools(showIfIncomplete: true) }
+        .task { await model.launchCheck() }
         .frame(minWidth: 960, minHeight: 640)
     }
 }

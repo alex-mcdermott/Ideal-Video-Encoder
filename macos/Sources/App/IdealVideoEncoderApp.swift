@@ -58,6 +58,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         TestHooks.start()
+        // Space plays/pauses the preview, unless a text field is being edited
+        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, event.keyCode == 49,
+                  event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting([.capsLock, .numericPad, .function]).isEmpty,
+                  !(event.window?.firstResponder is NSText), event.window?.attachedSheet == nil,
+                  self.model.preview.isActive else { return event }
+            self.model.preview.togglePlay()
+            return nil
+        }
     }
 
     /// Finder "Open With", files dropped on the Dock icon, and `open -a`.

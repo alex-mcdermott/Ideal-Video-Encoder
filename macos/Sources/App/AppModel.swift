@@ -130,6 +130,15 @@ final class AppModel {
 
     // MARK: tools
 
+    @ObservationIgnored private var didLaunchCheck = false
+
+    /// The launch check runs once even if SwiftUI starts the window's task twice.
+    func launchCheck() async {
+        guard !didLaunchCheck else { return }
+        didLaunchCheck = true
+        await checkTools(showIfIncomplete: true)
+    }
+
     func checkTools(showIfIncomplete: Bool) async {
         let report = await ToolReport.check(settings: settings)
         toolReport = report

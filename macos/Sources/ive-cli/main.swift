@@ -5,6 +5,7 @@
 
 // Command-line harness for the core library: check tools, probe clips, print the ffmpeg command.
 
+import AVFoundation
 import Foundation
 import IVECore
 
@@ -107,6 +108,42 @@ case "encode":
     sigint.setEventHandler { print("[cli] cancelling"); task.cancel() }
     sigint.resume()
     await task.value
+
+case "previewcheck":
+    // Preview pipeline vs ffmpeg for one frame: ive-cli previewcheck <file> [--frame N] [--ev X] [--lut FILE]
+    let (pos, f) = options(argv.dropFirst(2))
+    guard let file = pos.first, let ffmpeg = ToolLocator.locate(.ffmpeg, override: settings.ffmpegPath),
+          let ffprobe = ToolLocator.locate(.ffprobe, override: settings.ffprobePath) else { fail(usage) }
+    do {
+        let m = try await Probe.run(ffprobe: ffprobe, path: file)
+        let lut = try f["lut"].map { try CubeLUT.load($0) }
+        let look = PreviewLook(exposure: Double(f["ev"] ?? "0") ?? 0, isFullRange: m.isFullRange, lut: lut)
+        let r = try await PreviewVerifier.compare(path: file, index: Int(f["frame"] ?? "10") ?? 10, look: look, lutPath: f["lut"], ffmpeg: ffmpeg)
+        print(String(format: "%dx%d range=%@ ev=%@ lut=%@  MAD R %.3f G %.3f B %.3f overall %.3f /255  max %d  >2: %.3f%%  means %.2f vs %.2f",
+                     r.width, r.height, m.isFullRange ? "full" : "limited", f["ev"] ?? "0", f["lut"] == nil ? "no" : "yes",
+                     r.mad[0], r.mad[1], r.mad[2], r.overall, r.maxDiff, r.over2 * 100, r.previewMean, r.ffmpegMean))
+    } catch { fail(error.localizedDescription) }
+
+case "playbench":
+    // ive-cli playbench <file> [--seconds 15] [--ev X] [--lut FILE]
+    let (pos, f) = options(argv.dropFirst(2))
+    guard let file = pos.first, let ffprobe = ToolLocator.locate(.ffprobe, override: settings.ffprobePath) else { fail(usage) }
+    do {
+        let m = try await Probe.run(ffprobe: ffprobe, path: file)
+        let look = PreviewLook(exposure: Double(f["ev"] ?? "0") ?? 0, isFullRange: m.isFullRange, lut: try f["lut"].map { try CubeLUT.load($0) })
+        let r = try await PlaybackBench.run(path: file, look: look, seconds: Double(f["seconds"] ?? "15") ?? 15)
+        print(String(format: "%dx%d %@ ev=%@ lut=%@: %.1f s video in %.1f s wall -> speed %.2fx; composited %d frames (%.1f fps, expected %.0f); delivered %d; dropped %@",
+                     m.width, m.height, m.pixelFormat ?? "?", f["ev"] ?? "0", f["lut"] == nil ? "no" : "yes", r.videoSeconds, r.wallSeconds, r.speed,
+                     r.framesRendered, Double(r.framesRendered) / r.wallSeconds, r.expectedFrames, r.framesDelivered,
+                     r.droppedFrames.map(String.init) ?? "n/a"))
+    } catch { fail(error.localizedDescription) }
+
+case "hwdecode":
+    let (pos, _) = options(argv.dropFirst(2))
+    for file in pos {
+        let hw = await HardwareDecode.isSupported(for: AVURLAsset(url: URL(fileURLWithPath: file)))
+        print("\((file as NSString).lastPathComponent): hardware decode \(hw.map { $0 ? "yes" : "no" } ?? "unknown")")
+    }
 
 default:
     fail(usage)
