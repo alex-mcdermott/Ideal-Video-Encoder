@@ -13,7 +13,8 @@ It was built around Fujifilm footage (X-H2S 6.2K open gate, X-T5 6.2K/4K, F-Log2
 - **3D LUTs (`.cube`)** applied at 10-bit, with correct full-to-limited range handling for full-range camera files.
 - **HEVC (x265) or AV1 (SVT-AV1)**, 10-bit, with CRF quality control and an optional **bitrate cap** (constrained VBR) for predictable file sizes.
 - **Grain retention** levels (Off / Light / Strong): x265 grain tuning for HEVC, film-grain synthesis for AV1, plus an Auto mode.
-- **Settings analyser**: encodes short samples of your clips, scores them against the source with [VMAF](https://github.com/Netflix/vmaf), and suggests the CRF and bitrate cap that hit a quality target.
+- **Settings analyser**: encodes short samples of each clip, scores them against the source with [VMAF](https://github.com/Netflix/vmaf), and finds the CRF and bitrate cap that hit a quality target. Use the result per clip or for everything.
+- **Quality target mode**: pick a VMAF score instead of a CRF, and every clip is measured just before it's encoded and gets its own CRF and cap.
 - **Batch queue** with per-clip progress, ETA, cancel, scheduled start (4 am / 1 pm / 7 pm) and an optional CSV log.
 - **Metadata kept**: capture date, camera, lens, film simulation, GPS and more are copied with ExifTool, including Apple-compatible keys, and file dates are set to the capture time.
 - **Flexible output**: next to each source clip or in a chosen folder, with an optional subfolder. Never overwrites a source file.
@@ -89,14 +90,21 @@ Choose **HEVC** when files need to play everywhere (Apple Photos on older device
 
 ![Analysis tab](assets/screenshot-analysis.png)
 
-Pick a quality target (High = VMAF 93, Transparent = 95, Archival = 97) and press **Analyse**. For each selected clip it:
+Pick a quality target (High = VMAF 93, Transparent = 95, Archival = 97) and press **Analyse**. It analyses every clip in the queue on its own (or only the clips you multi-select). For each clip it:
 
 1. Encodes one or two 3-second samples with your current look (exposure, LUT) and grain settings, using the real encoder settings.
 2. Scores each sample against the identically filtered source with VMAF, and searches for the **highest CRF that still meets the target** (usually 4-6 test encodes).
 3. Suggests a **bitrate cap about 20% above the busiest second** at that CRF, so the cap only catches spikes.
 4. Scores your **current** CRF and cap on the same samples for comparison.
 
-**Apply** copies the suggestion into the encoding settings. With several clips, the suggestion uses the most demanding clip's CRF and the largest cap, so every clip meets the target. Expect a few minutes per 4K clip and longer for 6K. VMAF is measured at the source resolution with the default model, so it is slightly conservative for footage you will mostly watch downscaled.
+Then choose:
+
+- **Use per clip**: each clip encodes with its own CRF and cap, shown on the clip in the queue. A clip's result is only used while the codec, exposure, LUT and grain settings match the ones it was analysed with; the queue tells you when they no longer do.
+- **Apply to all**: one CRF and cap for everything (the most demanding clip's CRF and the largest cap, so every clip meets the target).
+
+### Quality target (automatic)
+
+Instead of a CRF, set **Encoding > Quality target** to VMAF 93, 95 or 97. Each clip is then measured just before it's encoded (the same method as the Analysis tab) and encoded with its own CRF and cap. Results are remembered on the clip, so re-encoding with the same target and settings skips the measurement. With **Bitrate cap** off, clips are encoded at their measured CRF without a cap. Expect a few minutes per 4K clip and longer for 6K. VMAF is measured at the source resolution with the default model, so it is slightly conservative for footage you will mostly watch downscaled.
 
 ## How the encode works
 

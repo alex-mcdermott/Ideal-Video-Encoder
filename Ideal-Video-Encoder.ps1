@@ -25,7 +25,7 @@ namespace IdealVE
         public event PropertyChangedEventHandler PropertyChanged;
         void Raise(string name) { PropertyChangedEventHandler h = PropertyChanged; if (h != null) h(this, new PropertyChangedEventArgs(name)); }
 
-        string _name, _path, _status, _statusKey, _detail, _info;
+        string _name, _path, _status, _statusKey, _detail, _info, _note = "";
         double _progress;
 
         public string Name { get { return _name; } set { _name = value; Raise("Name"); } }
@@ -34,6 +34,7 @@ namespace IdealVE
         public string StatusKey { get { return _statusKey; } set { _statusKey = value; Raise("StatusKey"); } }
         public string Detail { get { return _detail; } set { _detail = value; Raise("Detail"); } }
         public string Info { get { return _info; } set { _info = value; Raise("Info"); } }
+        public string Note { get { return _note; } set { _note = value ?? ""; Raise("Note"); } }
         public double Progress { get { return _progress; } set { _progress = value; Raise("Progress"); } }
     }
 
@@ -380,6 +381,148 @@ $CoreScript = {
         return $result
     }
 
+    # ---- Quality search (shared by the Analysis tab and the "Quality target" encode mode) ----
+    function Format-Num([double]$v, [string]$f = '0.0') { $v.ToString($f, [System.Globalization.CultureInfo]::InvariantCulture) }
+
+    # Run ffmpeg hidden and cancellable (registers the process in $Sync.Proc); returns stderr
+    function Invoke-FfmpegChecked([string[]]$a, $Sync) {
+        $p = Start-Hidden 'ffmpeg' $a
+        if ($Sync) { $Sync.Proc = $p }
+        $err = $p.StandardError.ReadToEnd()
+        $p.WaitForExit()
+        if ($Sync) { $Sync.Proc = $null }
+        if ($Sync -and $Sync.Cancel) { throw 'cancelled' }
+        if ($p.ExitCode -ne 0) { throw ('ffmpeg failed: ' + (($err -split "`r?`n" | Where-Object { $_ } | Select-Object -Last 3) -join ' | ')) }
+        return $err
+    }
+
+    # Encode every sample segment of $clip at one CRF/cap; return average bitrate, busiest 1 s, VMAF mean and worst 1%
+    function Measure-QualityPoint($clip, [int]$crf, [int]$cap, [string]$codec, $Sync, [string]$tmp) {
+        $inv = [System.Globalization.CultureInfo]::InvariantCulture
+        $threads = [Environment]::ProcessorCount
+        $bits = 0.0; $secs = 0.0; $peak = 0.0
+        $scores = New-Object 'System.Collections.Generic.List[double]'
+        $i = 0
+        foreach ($start in $clip.Starts) {
+            $i++
+            $out = Join-Path $tmp ("{0}-c{1}-m{2}-s{3}.mp4" -f $clip.Id, $crf, $cap, $i)
+            $a = @('-hide_banner', '-nostdin', '-loglevel', 'error', '-y', '-ss', (Format-Num $start '0.000'), '-t', (Format-Num $clip.SegLen '0.000'), '-i', $clip.Path)
+            if ($clip.Vf.Count) { $a += '-vf', ($clip.Vf -join ',') }
+            $a += '-an', '-fps_mode', 'passthrough'
+            $a += Get-VideoCodecArgs $codec $crf $cap $clip.Grain $clip.W $clip.H
+            $a += '-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709', '-color_range', 'tv', $out
+            [void](Invoke-FfmpegChecked $a $Sync)
+
+            $pk = @(Invoke-Hidden 'ffprobe' @('-v', 'error', '-select_streams', 'v:0', '-show_entries', 'packet=pts_time,size', '-of', 'csv=p=0', $out) |
+                ForEach-Object { $t, $s = $_ -split ','; $tv = 0.0; if ([double]::TryParse($t, [System.Globalization.NumberStyles]::Float, $inv, [ref]$tv)) { [pscustomobject]@{ T = $tv; B = [double]$s * 8 } } } |
+                Sort-Object T)
+            if ($pk.Count -eq 0) { throw 'sample encode produced no video' }
+            $frameDur = if ($pk.Count -gt 1) { ($pk[-1].T - $pk[0].T) / ($pk.Count - 1) } else { 1 / 30 }
+            $bits += ($pk | Measure-Object B -Sum).Sum
+            $secs += ($pk[-1].T - $pk[0].T) + $frameDur
+            $j = 0; $acc = 0.0
+            for ($k = 0; $k -lt $pk.Count; $k++) {
+                $acc += $pk[$k].B
+                while ($pk[$k].T - $pk[$j].T -ge 1.0) { $acc -= $pk[$j].B; $j++ }
+                if ($pk[$k].T - $pk[0].T + $frameDur -ge 1.0 -or $pk.Count -lt 2) { $peak = [math]::Max($peak, $acc) }
+            }
+            if ($peak -eq 0) { $peak = $acc }
+
+            $json = Join-Path $tmp ("vmaf-{0}-c{1}-m{2}-s{3}.json" -f $clip.Id, $crf, $cap, $i)
+            $jsonEsc = ($json -replace '\\', '/') -replace ':', '\:'
+            # Pair frames by index, not timestamp: container timestamp rounding otherwise shifts the pairing by a frame
+            $refChain = @($clip.Vf) + @($clip.RefTail) + 'format=yuv420p10le'
+            $lavfi = "[0:v]setpts=N/30/TB,format=yuv420p10le[d];[1:v]" + ($refChain -join ',') + ",setpts=N/30/TB" +
+                "[r];[d][r]libvmaf=log_fmt=json:log_path='$jsonEsc':n_threads=${threads}:shortest=1"
+            [void](Invoke-FfmpegChecked @('-hide_banner', '-nostdin', '-loglevel', 'error', '-i', $out, '-ss', (Format-Num $start '0.000'), '-t', (Format-Num $clip.SegLen '0.000'), '-i', $clip.Path, '-lavfi', $lavfi, '-f', 'null', '-') $Sync)
+            $vj = Get-Content -LiteralPath $json -Raw | ConvertFrom-Json
+            foreach ($f in $vj.frames) { $scores.Add([double]$f.metrics.vmaf) }
+            Remove-Item -LiteralPath $out, $json -Force -ErrorAction SilentlyContinue
+        }
+        $sorted = @($scores | Sort-Object)
+        return [pscustomobject]@{
+            Crf = $crf; Cap = $cap
+            Avg = $bits / $secs / 1e6
+            Peak = $peak / 1e6
+            Vmaf = ($scores | Measure-Object -Average).Average
+            Low = $sorted[[math]::Floor($sorted.Count * 0.01)]
+        }
+    }
+
+    # Find the highest CRF whose samples meet VMAF $Target with the current look, grain and codec; the cap is set
+    # ~20% above the busiest second at that CRF so it only catches spikes. $OnTest is called before each sample
+    # encode with (label, percent); $OnPoint after each with (point, label). -Compare also scores $Opt's own CRF/cap.
+    function Find-QualityCrf([string]$file, [hashtable]$Opt, [double]$Target, $Sync, [string]$tmp, [int]$Id = 0,
+                             [scriptblock]$OnTest, [scriptblock]$OnPoint, [switch]$Compare) {
+        $dur = Get-Duration $file
+        if (-not ($dur -gt 0)) { throw 'could not read the clip duration' }
+        $isFull = [bool](Get-VideoRangeFull $file)
+        $probe = Invoke-Hidden 'ffprobe' @('-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height,bit_rate:format=bit_rate', '-of', 'default=nw=1', $file)
+        $info = @{}; foreach ($l in $probe) { $kv = $l -split '=', 2; if (-not $info.ContainsKey($kv[0])) { $info[$kv[0]] = $kv[1] } }
+
+        # Grain: manual level, or the auto rule from ISO / F-Log2 (no noise pass here, to save time)
+        $grain = $Opt.Grain
+        if ($Opt.AutoGrain) { $iso = Get-ISO $file; $grain = if ((Is-FLog2 $file) -or ($iso -ge 3200)) { 2 } else { 0 } }
+
+        # Samples: one 3 s segment from the middle of short clips, two from longer ones
+        $segLen = [math]::Min(3.0, [math]::Max(0.5, $dur - 0.1))
+        $starts = if ($dur -le 20) { @([math]::Max(0, ($dur - $segLen) / 2)) } else { @(($dur * 0.3 - $segLen / 2), ($dur * 0.7 - $segLen / 2)) }
+        $vf = Get-FilterChain -Exposure $Opt.Exposure -LutPath $Opt.LutPath -IsFull $isFull
+        # A LUT leaves RGB; convert the reference the way the encoder does (BT.709, limited)
+        $refTail = if ($Opt.LutPath) { @('scale=out_color_matrix=bt709:out_range=tv') } else { @() }
+        $clip = @{ Id = $Id; Path = $file; Starts = $starts; SegLen = $segLen; Vf = $vf; RefTail = $refTail; Grain = $grain; W = [int]$info['width']; H = [int]$info['height'] }
+
+        $points = @{}
+        $state = @{ Evals = 0; Max = 7 }
+        $measure = {
+            param([int]$crf, [int]$cap)
+            $key = "$crf/$cap"
+            if (-not $points.ContainsKey($key)) {
+                $state.Evals++
+                $label = if ($cap) { "CRF $crf + $cap Mbps cap" } else { "CRF $crf" }
+                if ($OnTest) { & $OnTest $label ([math]::Min(95, $state.Evals / $state.Max * 100)) }
+                $points[$key] = Measure-QualityPoint $clip $crf $cap $Opt.Codec $Sync $tmp
+                if ($OnPoint) { & $OnPoint $points[$key] $label }
+            }
+            return $points[$key]
+        }
+        # Dot-sourced, so it updates this function's $good/$bad
+        $pick = { $good = @($points.Values | Where-Object { $_.Cap -eq 0 -and $_.Vmaf -ge $Target } | Sort-Object Crf)
+                  $bad  = @($points.Values | Where-Object { $_.Cap -eq 0 -and $_.Vmaf -lt $Target } | Sort-Object Crf) }
+
+        # Bracket the target between two measured CRFs, then interpolate (secant). SVT-AV1's CRF runs 0-63, x265's 0-51.
+        if ($Opt.Codec -eq 'av1') { $lo = 20; $hi = 55; $p1 = 30; $p2 = 40; $step = 6 } else { $lo = 14; $hi = 34; $p1 = 22; $p2 = 28; $step = 4 }
+        [void](& $measure $p1 0)
+        [void](& $measure $p2 0)
+        $good = @(); $bad = @(); . $pick
+        while ($good.Count -eq 0 -and $bad[0].Crf -gt $lo -and $state.Evals -lt $state.Max - 1) {
+            [void](& $measure ([math]::Max($lo, $bad[0].Crf - $step)) 0); . $pick
+        }
+        while ($bad.Count -eq 0 -and $good[-1].Crf -lt $hi -and $state.Evals -lt $state.Max - 1) {
+            [void](& $measure ([math]::Min($hi, $good[-1].Crf + $step)) 0); . $pick
+        }
+        while ($good.Count -and $bad.Count -and ($bad[0].Crf - $good[-1].Crf) -gt 1 -and $state.Evals -lt $state.Max - 1) {
+            $g = $good[-1]; $b = $bad[0]
+            $guess = $g.Crf + ($g.Vmaf - $Target) * ($b.Crf - $g.Crf) / [math]::Max(0.01, $g.Vmaf - $b.Vmaf)
+            $next = [math]::Max($g.Crf + 1, [math]::Min($b.Crf - 1, [int][math]::Round($guess)))
+            [void](& $measure $next 0); . $pick
+        }
+        $met = $good.Count -gt 0
+        $best = if ($met) { $good[-1] } else { $points.Values | Where-Object { $_.Cap -eq 0 } | Sort-Object Crf | Select-Object -First 1 }
+        $cap = [int]([math]::Ceiling($best.Peak * 1.2 / 5) * 5)
+
+        $current = $null
+        if ($Compare -and -not $Opt.AutoCrf -and -not $Opt.QualityTarget) {
+            $current = & $measure $Opt.Crf $(if ($Opt.VbrEnabled) { [int][math]::Round($Opt.MaxRate) } else { 0 })
+        }
+        return [pscustomobject]@{
+            Crf = $best.Crf; Cap = $cap; Grain = $grain; Met = $met; Best = $best; Current = $current
+            Points = @($points.Values | Where-Object { $_.Cap -eq 0 } | Sort-Object Crf)
+            Width = $info['width']; Height = $info['height']; SourceMbps = ([double]($info['bit_rate'] -as [double])) / 1e6
+            Samples = $starts.Count; SampleLength = $segLen
+        }
+    }
+
     function Resolve-OutputDir([string]$file, [string]$mode, [string]$folder, [string]$sub){
         $base = if ($mode -eq 'custom' -and $folder) { $folder } else { [IO.Path]::GetDirectoryName($file) }
         $sub = "$sub".Trim().Trim('\', '/')
@@ -414,7 +557,7 @@ $WorkerScript = {
         Post @{ T = 'overall'; Value = $frac * 100; Text = $text; Eta = $eta }
     }
 
-    $total = $Jobs.Count; $index = 0; $ok = 0; $failed = 0
+    $total = $Jobs.Count; $index = 0; $ok = 0; $failed = 0; $qTmp = $null
     $t0 = Get-Date
     $usedOut = @{}
 
@@ -450,8 +593,38 @@ $WorkerScript = {
             $heat    = Heat-Bar (Complexity-Score $file)
             Log ("{0}: ISO {1}, F-Log2 {2}, source range {3}" -f $nameOnly, $(if ($iso) { $iso } else { 'n/a' }), $(if ($isFlog2) { 'yes' } else { 'no' }), $(if ($isFull) { 'full -> zscale to limited' } else { 'limited' }))
 
+            # CRF/cap/grain for this clip, in priority order:
+            #   1. Quality target: a per-clip analysis for the same target and settings, otherwise measure now
+            #   2. A per-clip analysis applied from the Analysis tab ("Use per clip") for the same settings
+            #   3. The global CRF (manual or Auto) and cap
+            $q = $null; $qSource = ''
+            $ov = if ($Opt.Overrides) { $Opt.Overrides[$file] } else { $null }
+            if ($ov -and $ov.Key -ne $Opt.LookKey) {
+                Log "${nameOnly}: its analysis was made with different codec/look/grain settings, so it isn't used."
+                $ov = $null
+            }
+            if ($Opt.QualityTarget -gt 0) {
+                if ($ov -and [double]$ov.Target -eq [double]$Opt.QualityTarget) {
+                    $q = $ov; $qSource = "analysed, VMAF $($Opt.QualityTarget)"
+                    Log "${nameOnly}: reusing its analysis for VMAF $($Opt.QualityTarget): CRF $($q.Crf), cap $($q.Cap) Mbps."
+                } else {
+                    if (-not $qTmp) { $qTmp = Join-Path ([IO.Path]::GetTempPath()) ('IdealVE-target-' + [guid]::NewGuid().ToString('N').Substring(0, 8)); New-Item -ItemType Directory -Path $qTmp -Force | Out-Null }
+                    $onTest = { param($label, $pct) Set-Clip $file "Measuring ($label)" 'active' $pct "Finding the CRF for VMAF $($Opt.QualityTarget)"; Post-Overall 0 }
+                    $onPoint = { param($pt, $label) Log ("{0}: {1} {2} {3} Mbps, VMAF {4}" -f $nameOnly, $label, $arrow, (Format-Num $pt.Avg), (Format-Num $pt.Vmaf '0.00')) }
+                    $r = Find-QualityCrf $file $Opt ([double]$Opt.QualityTarget) $Sync $qTmp $index $onTest $onPoint
+                    $q = @{ Crf = $r.Crf; Cap = $r.Cap; Grain = $r.Grain; Target = $Opt.QualityTarget; Key = $Opt.LookKey; Met = $r.Met; Vmaf = $r.Best.Vmaf }
+                    $qSource = "VMAF $($Opt.QualityTarget)"
+                    Log ("{0}: VMAF {1} target {2} CRF {3}, cap {4} Mbps (sample VMAF {5}){6}" -f $nameOnly, $Opt.QualityTarget, $arrow, $r.Crf, $r.Cap, (Format-Num $r.Best.Vmaf), $(if (-not $r.Met) { '; target not reached, using the best tested' } else { '' }))
+                    # Remember it on the clip, so re-running with the same settings skips the measurement
+                    Post @{ T = 'override'; Path = $file; Crf = $r.Crf; Cap = $r.Cap; Grain = $r.Grain; Target = $Opt.QualityTarget; Key = $Opt.LookKey; Met = $r.Met; CodecName = $Opt.CodecName; Vmaf = $r.Best.Vmaf }
+                }
+            } elseif ($ov) {
+                $q = $ov; $qSource = 'analysed'
+                Log "${nameOnly}: using its analysis: CRF $($q.Crf), cap $($q.Cap) Mbps."
+            }
+
             $motion = $null; $detail = $null; $psnr = $null
-            if ($Opt.AutoCrf -or $Opt.AutoGrain) {
+            if (-not $q -and ($Opt.AutoCrf -or $Opt.AutoGrain)) {
                 $analysis = Analyze-Clip $file $Sync
                 $Sync.Proc = $null
                 if ($Sync.Cancel) { Set-Clip $file 'Cancelled' 'cancelled' 0 $null; break }
@@ -464,41 +637,48 @@ $WorkerScript = {
                     $(if ($psnr) { [math]::Round($psnr, 1) } else { 'n/a' }))
             }
 
-            # Grain selection (baseline from ISO/log + noise)
-            $grain = $Opt.Grain
-            if ($Opt.AutoGrain) {
-                $grain = 0
-                if ($isFlog2 -or ($iso -ge 3200)) { $grain = 2 }
-                if ($psnr -and $psnr -lt 35)     { $grain = [math]::Max($grain, 2) }  # very noisy
-                elseif ($psnr -and $psnr -lt 38) { $grain = [math]::Max($grain, 1) }  # somewhat noisy
-            }
-
-            # CRF selection (noise/motion/detail plus ISO/log signals)
-            $crf = $Opt.Crf
-            if ($Opt.AutoCrf) {
-                $crf = 22
-                if ($psnr) {
-                    if ($psnr -lt 35) { $crf -= 3 }
-                    elseif ($psnr -lt 38) { $crf -= 2 }
-                    elseif ($psnr -lt 40) { $crf -= 1 }
-                } elseif ($isFlog2 -or ($iso -ge 3200)) {
-                    $crf -= 2
+            if ($q) {
+                # The measured CRF only holds for the grain level it was measured with
+                $crf = [int]$q.Crf; $grain = [int]$q.Grain
+                $capUse = if ($Opt.VbrEnabled) { [double]$q.Cap } else { 0 }
+            } else {
+                # Grain selection (baseline from ISO/log + noise)
+                $grain = $Opt.Grain
+                if ($Opt.AutoGrain) {
+                    $grain = 0
+                    if ($isFlog2 -or ($iso -ge 3200)) { $grain = 2 }
+                    if ($psnr -and $psnr -lt 35)     { $grain = [math]::Max($grain, 2) }  # very noisy
+                    elseif ($psnr -and $psnr -lt 38) { $grain = [math]::Max($grain, 1) }  # somewhat noisy
                 }
-                if ($motion -and $motion -gt 50) { $crf -= 1 }
-                if ($detail -and $detail -gt 8000) { $crf -= 1 }
-                if ($motion -and $motion -lt 10 -and $detail -and $detail -lt 3000) { $crf += 1 }
-                if ($crf -lt 16) { $crf = 16 }
-                if ($crf -gt 24) { $crf = 24 }
-                if ($Opt.Codec -eq 'av1') { $crf = ConvertTo-Av1Crf $crf }
+
+                # CRF selection (noise/motion/detail plus ISO/log signals)
+                $crf = $Opt.Crf
+                if ($Opt.AutoCrf) {
+                    $crf = 22
+                    if ($psnr) {
+                        if ($psnr -lt 35) { $crf -= 3 }
+                        elseif ($psnr -lt 38) { $crf -= 2 }
+                        elseif ($psnr -lt 40) { $crf -= 1 }
+                    } elseif ($isFlog2 -or ($iso -ge 3200)) {
+                        $crf -= 2
+                    }
+                    if ($motion -and $motion -gt 50) { $crf -= 1 }
+                    if ($detail -and $detail -gt 8000) { $crf -= 1 }
+                    if ($motion -and $motion -lt 10 -and $detail -and $detail -lt 3000) { $crf += 1 }
+                    if ($crf -lt 16) { $crf = 16 }
+                    if ($crf -gt 24) { $crf = 24 }
+                    if ($Opt.Codec -eq 'av1') { $crf = ConvertTo-Av1Crf $crf }
+                }
+                $capUse = if ($Opt.VbrEnabled) { [double]$Opt.MaxRate } else { 0 }
             }
 
-            $crfText   = if ($Opt.AutoCrf)   { "$crf (auto)" }   else { "$crf" }
+            $crfText   = if ($q) { "$crf ($qSource)" } elseif ($Opt.AutoCrf) { "$crf (auto)" } else { "$crf" }
             $grainText = @('Off', 'Light', 'Strong')[$grain]
             if ($Opt.AutoGrain) { $grainText += ' (auto)' }
-            $vbvText   = if ($Opt.VbrEnabled) { $Opt.MaxRate.ToString($inv) + "M" } else { 'off' }
+            $vbvText   = if ($capUse -gt 0) { $capUse.ToString($inv) + "M" } else { 'off' }
             $evText    = $Opt.Exposure.ToString('+0.0;-0.0;0.0', $inv)
             $detailBase = "$($Opt.CodecName) CRF $crfText $dot Grain $grainText"
-            if ($Opt.VbrEnabled) { $detailBase += " $dot cap $($Opt.MaxRate.ToString($inv)) Mbps" }
+            if ($capUse -gt 0) { $detailBase += " $dot cap $($capUse.ToString($inv)) Mbps" }
             if ($Opt.Exposure -ne 0) { $detailBase += " $dot $evText EV" }
 
             # Build args
@@ -524,7 +704,7 @@ $WorkerScript = {
 
             # Constrained VBR when capped: CRF quality target, VBV caps peaks (buffer = 2x max rate)
             $size = Get-VideoSize $file
-            $ffArgs += Get-VideoCodecArgs $Opt.Codec $crf $(if ($Opt.VbrEnabled) { $Opt.MaxRate } else { 0 }) $grain $size[0] $size[1]
+            $ffArgs += Get-VideoCodecArgs $Opt.Codec $crf $capUse $grain $size[0] $size[1]
             $ffArgs += "-c:a","aac","-b:a","320k","-ar","48000","-ac","2"
             $ffArgs += "-color_primaries","bt709","-color_trc","bt709","-colorspace","bt709","-color_range","tv","-movflags","+faststart"
             $ffArgs += $outPath
@@ -695,6 +875,7 @@ $WorkerScript = {
         }
         catch {
             $Sync.Proc = $null
+            if ($Sync.Cancel) { Set-Clip $file 'Cancelled' 'cancelled' 0 $null; Log "${nameOnly}: cancelled."; break }
             Set-Clip $file 'Failed' 'error' 0 $null
             Log "${nameOnly}: FAILED - $($_.Exception.Message)"
             $failed++
@@ -703,21 +884,19 @@ $WorkerScript = {
         Post-Overall 0
     }
 
+    if ($qTmp) { Remove-Item -LiteralPath $qTmp -Recurse -Force -ErrorAction SilentlyContinue }
     Post @{ T = 'end'; Ok = $ok; Failed = $failed; Cancelled = [bool]$Sync.Cancel; Elapsed = ((Get-Date) - $t0) }
 }
 
-# ========== Analysis worker: sample encodes + VMAF to suggest CRF and bitrate cap ==========
-# For each clip: encode short samples (same look, grain and x265 tuning as a real encode), score them against the
-# filtered source with VMAF, search for the highest CRF that still meets the target, then set the cap ~20% above
-# the busiest second at that CRF so it only catches spikes. Also scores the user's current CRF/cap for comparison.
+# ========== Analysis worker: sample encodes + VMAF to suggest CRF and bitrate cap per clip ==========
+# Each clip is analysed on its own (Find-QualityCrf). Results are reported per clip ('aresult') so the UI can keep
+# them per clip, plus an overall suggestion (the most demanding clip's CRF and the largest cap) for "Apply to all".
 $AnalyzeScript = {
     param($Sync, $Jobs, $Opt, $CoreText)
     . ([scriptblock]::Create($CoreText))
-    $inv = [System.Globalization.CultureInfo]::InvariantCulture
     $dot = [string][char]0x00B7
     $arrow = [string][char]0x2192
     $T = [double]$Opt.TargetVmaf
-    $threads = [Environment]::ProcessorCount
 
     function Post([hashtable]$m) { $Sync.Queue.Enqueue($m) }
     function Log([string]$text) { Post @{ T = 'log'; Text = $text } }
@@ -726,70 +905,6 @@ $AnalyzeScript = {
         if ($null -ne $progress) { $m.Progress = [double]$progress }
         if ($null -ne $detail) { $m.Detail = [string]$detail }
         Post $m
-    }
-    function Fmt([double]$v, [string]$f = '0.0') { $v.ToString($f, $inv) }
-
-    # Run ffmpeg hidden, cancellable; returns stderr
-    function Invoke-Ff([string[]]$a) {
-        $p = Start-Hidden 'ffmpeg' $a
-        $Sync.Proc = $p
-        $err = $p.StandardError.ReadToEnd()
-        $p.WaitForExit()
-        $Sync.Proc = $null
-        if ($Sync.Cancel) { throw 'cancelled' }
-        if ($p.ExitCode -ne 0) { throw ('ffmpeg failed: ' + (($err -split "`r?`n" | Where-Object { $_ } | Select-Object -Last 3) -join ' | ')) }
-        return $err
-    }
-
-    # Encode every sample segment at one CRF/cap; return average bitrate, busiest 1 s, VMAF mean and worst 1%
-    function Measure-Point($clip, [int]$crf, [int]$cap) {
-        $bits = 0.0; $secs = 0.0; $peak = 0.0
-        $scores = New-Object 'System.Collections.Generic.List[double]'
-        $i = 0
-        foreach ($start in $clip.Starts) {
-            $i++
-            $out = Join-Path $tmp ("{0}-c{1}-m{2}-s{3}.mp4" -f $clip.Id, $crf, $cap, $i)
-            $a = @('-hide_banner', '-nostdin', '-loglevel', 'error', '-y', '-ss', (Fmt $start '0.000'), '-t', (Fmt $clip.SegLen '0.000'), '-i', $clip.Path)
-            if ($clip.Vf.Count) { $a += '-vf', ($clip.Vf -join ',') }
-            $a += '-an', '-fps_mode', 'passthrough'
-            $a += Get-VideoCodecArgs $Opt.Codec $crf $cap $clip.Grain $clip.W $clip.H
-            $a += '-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709', '-color_range', 'tv', $out
-            [void](Invoke-Ff $a)
-
-            $pk = @(Invoke-Hidden 'ffprobe' @('-v', 'error', '-select_streams', 'v:0', '-show_entries', 'packet=pts_time,size', '-of', 'csv=p=0', $out) |
-                ForEach-Object { $t, $s = $_ -split ','; $tv = 0.0; if ([double]::TryParse($t, [System.Globalization.NumberStyles]::Float, $inv, [ref]$tv)) { [pscustomobject]@{ T = $tv; B = [double]$s * 8 } } } |
-                Sort-Object T)
-            if ($pk.Count -eq 0) { throw 'sample encode produced no video' }
-            $frameDur = if ($pk.Count -gt 1) { ($pk[-1].T - $pk[0].T) / ($pk.Count - 1) } else { 1 / 30 }
-            $bits += ($pk | Measure-Object B -Sum).Sum
-            $secs += ($pk[-1].T - $pk[0].T) + $frameDur
-            $j = 0; $acc = 0.0
-            for ($k = 0; $k -lt $pk.Count; $k++) {
-                $acc += $pk[$k].B
-                while ($pk[$k].T - $pk[$j].T -ge 1.0) { $acc -= $pk[$j].B; $j++ }
-                if ($pk[$k].T - $pk[0].T + $frameDur -ge 1.0 -or $pk.Count -lt 2) { $peak = [math]::Max($peak, $acc) }
-            }
-            if ($peak -eq 0) { $peak = $acc }
-
-            $json = Join-Path $tmp ("vmaf-{0}-c{1}-m{2}-s{3}.json" -f $clip.Id, $crf, $cap, $i)
-            $jsonEsc = ($json -replace '\\', '/') -replace ':', '\:'
-            # Pair frames by index, not timestamp: container timestamp rounding otherwise shifts the pairing by a frame
-            $refChain = @($clip.Vf) + @($clip.RefTail) + 'format=yuv420p10le'
-            $lavfi = "[0:v]setpts=N/30/TB,format=yuv420p10le[d];[1:v]" + ($refChain -join ',') + ",setpts=N/30/TB" +
-                "[r];[d][r]libvmaf=log_fmt=json:log_path='$jsonEsc':n_threads=${threads}:shortest=1"
-            [void](Invoke-Ff @('-hide_banner', '-nostdin', '-loglevel', 'error', '-i', $out, '-ss', (Fmt $start '0.000'), '-t', (Fmt $clip.SegLen '0.000'), '-i', $clip.Path, '-lavfi', $lavfi, '-f', 'null', '-'))
-            $vj = Get-Content -LiteralPath $json -Raw | ConvertFrom-Json
-            foreach ($f in $vj.frames) { $scores.Add([double]$f.metrics.vmaf) }
-            Remove-Item -LiteralPath $out, $json -Force -ErrorAction SilentlyContinue
-        }
-        $sorted = @($scores | Sort-Object)
-        return [pscustomobject]@{
-            Crf = $crf; Cap = $cap
-            Avg = $bits / $secs / 1e6
-            Peak = $peak / 1e6
-            Vmaf = ($scores | Measure-Object -Average).Average
-            Low = $sorted[[math]::Floor($sorted.Count * 0.01)]
-        }
     }
 
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ('IdealVE-analysis-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
@@ -803,95 +918,34 @@ $AnalyzeScript = {
             $name = [IO.Path]::GetFileName($file)
             try {
                 Set-Ana $file 'Preparing' 'active' 0 'Reading clip...'
-                $dur = Get-Duration $file
-                if (-not ($dur -gt 0)) { throw 'could not read the clip duration' }
-                $isFull = [bool](Get-VideoRangeFull $file)
-                $probe = Invoke-Hidden 'ffprobe' @('-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height,bit_rate:format=bit_rate', '-of', 'default=nw=1', $file)
-                $info = @{}; foreach ($l in $probe) { $kv = $l -split '=', 2; if (-not $info.ContainsKey($kv[0])) { $info[$kv[0]] = $kv[1] } }
-                $srcMbps = ([double]($info['bit_rate'] -as [double])) / 1e6
-
-                # Grain: manual level, or the auto rule from ISO / F-Log2 (no noise pass here, to save time)
-                $grain = $Opt.Grain
-                if ($Opt.AutoGrain) { $iso = Get-ISO $file; $grain = if ((Is-FLog2 $file) -or ($iso -ge 3200)) { 2 } else { 0 } }
-
-                # Samples: one 3 s segment from the middle of short clips, two from longer ones
-                $segLen = [math]::Min(3.0, [math]::Max(0.5, $dur - 0.1))
-                $starts = if ($dur -le 20) { @([math]::Max(0, ($dur - $segLen) / 2)) } else { @(($dur * 0.3 - $segLen / 2), ($dur * 0.7 - $segLen / 2)) }
-                $vf = Get-FilterChain -Exposure $Opt.Exposure -LutPath $Opt.LutPath -IsFull $isFull
-                # A LUT leaves RGB; convert the reference the way the encoder does (BT.709, limited)
-                $refTail = if ($Opt.LutPath) { @('scale=out_color_matrix=bt709:out_range=tv') } else { @() }
-                $clip = @{ Id = $index; Path = $file; Starts = $starts; SegLen = $segLen; Vf = $vf; RefTail = $refTail; Grain = $grain; W = [int]$info['width']; H = [int]$info['height'] }
-
-                $points = @{}
-                $evals = 0; $maxEvals = 7
-                $baseInfo = "{5} $dot {0}x{1} $dot source {2} Mbps $dot {3} sample(s) of {4} s" -f $info['width'], $info['height'], (Fmt $srcMbps '0'), $starts.Count, (Fmt $segLen '0.#'), $Opt.CodecName
-                $measure = {
-                    param([int]$crf, [int]$cap)
-                    $key = "$crf/$cap"
-                    if (-not $points.ContainsKey($key)) {
-                        $script:evals++
-                        $pct = [math]::Min(95, $script:evals / $maxEvals * 100)
-                        $label = if ($cap) { "CRF $crf + $cap Mbps cap" } else { "CRF $crf" }
-                        Set-Ana $file ("Testing $label") 'active' $pct $baseInfo
-                        $frac = ($index + $pct / 100) / $total
-                        $el = ((Get-Date) - $t0).TotalSeconds
-                        Post @{ T = 'overall'; Value = $frac * 100; Text = ("Analysing {0} of {1}" -f ($index + 1), $total); Eta = $(if ($frac -gt 0.02) { 'ETA ' + [TimeSpan]::FromSeconds($el * (1 - $frac) / $frac).ToString('hh\:mm\:ss') } else { '' }) }
-                        $points[$key] = Measure-Point $clip $crf $cap
-                        $p = $points[$key]
-                        Log ("{0}: {1} {2} {3} Mbps avg, {4} Mbps peak, VMAF {5} (worst 1% {6})" -f $name, $label, $arrow, (Fmt $p.Avg), (Fmt $p.Peak), (Fmt $p.Vmaf '0.00'), (Fmt $p.Low))
-                    }
-                    return $points["$crf/$cap"]
+                $onTest = {
+                    param($label, $pct)
+                    Set-Ana $file "Testing $label" 'active' $pct "$($Opt.CodecName) $dot target VMAF $T"
+                    $frac = ($index + $pct / 100) / $total
+                    $el = ((Get-Date) - $t0).TotalSeconds
+                    Post @{ T = 'overall'; Value = $frac * 100; Text = ("Analysing {0} of {1}" -f ($index + 1), $total); Eta = $(if ($frac -gt 0.02) { 'ETA ' + [TimeSpan]::FromSeconds($el * (1 - $frac) / $frac).ToString('hh\:mm\:ss') } else { '' }) }
                 }
-
-                # CRF search (uncapped): bracket the target between two measured CRFs, then interpolate
-                # Search window and first probes per codec (SVT-AV1's CRF scale runs 0-63, x265's 0-51)
-                if ($Opt.Codec -eq 'av1') { $lo = 20; $hi = 55; $p1 = 30; $p2 = 40; $step = 6 } else { $lo = 14; $hi = 34; $p1 = 22; $p2 = 28; $step = 4 }
-                [void](& $measure $p1 0)
-                [void](& $measure $p2 0)
-                $good = @($points.Values | Where-Object { $_.Cap -eq 0 -and $_.Vmaf -ge $T } | Sort-Object Crf)
-                $bad  = @($points.Values | Where-Object { $_.Cap -eq 0 -and $_.Vmaf -lt $T } | Sort-Object Crf)
-                while ($good.Count -eq 0 -and ($bad | Select-Object -First 1).Crf -gt $lo -and $script:evals -lt $maxEvals - 1) {
-                    [void](& $measure ([math]::Max($lo, $bad[0].Crf - $step)) 0)
-                    $good = @($points.Values | Where-Object { $_.Cap -eq 0 -and $_.Vmaf -ge $T } | Sort-Object Crf)
-                    $bad  = @($points.Values | Where-Object { $_.Cap -eq 0 -and $_.Vmaf -lt $T } | Sort-Object Crf)
+                $onPoint = {
+                    param($pt, $label)
+                    Log ("{0}: {1} {2} {3} Mbps avg, {4} Mbps peak, VMAF {5} (worst 1% {6})" -f $name, $label, $arrow, (Format-Num $pt.Avg), (Format-Num $pt.Peak), (Format-Num $pt.Vmaf '0.00'), (Format-Num $pt.Low))
                 }
-                while ($bad.Count -eq 0 -and ($good | Select-Object -Last 1).Crf -lt $hi -and $script:evals -lt $maxEvals - 1) {
-                    [void](& $measure ([math]::Min($hi, $good[-1].Crf + $step)) 0)
-                    $good = @($points.Values | Where-Object { $_.Cap -eq 0 -and $_.Vmaf -ge $T } | Sort-Object Crf)
-                    $bad  = @($points.Values | Where-Object { $_.Cap -eq 0 -and $_.Vmaf -lt $T } | Sort-Object Crf)
-                }
-                while ($good.Count -and $bad.Count -and ($bad[0].Crf - $good[-1].Crf) -gt 1 -and $script:evals -lt $maxEvals - 1) {
-                    $g = $good[-1]; $b = $bad[0]
-                    $guess = $g.Crf + ($g.Vmaf - $T) * ($b.Crf - $g.Crf) / [math]::Max(0.01, $g.Vmaf - $b.Vmaf)
-                    $next = [int][math]::Round($guess)
-                    $next = [math]::Max($g.Crf + 1, [math]::Min($b.Crf - 1, $next))
-                    [void](& $measure $next 0)
-                    $good = @($points.Values | Where-Object { $_.Cap -eq 0 -and $_.Vmaf -ge $T } | Sort-Object Crf)
-                    $bad  = @($points.Values | Where-Object { $_.Cap -eq 0 -and $_.Vmaf -lt $T } | Sort-Object Crf)
-                }
-                $met = $good.Count -gt 0
-                $best = if ($met) { $good[-1] } else { $points.Values | Where-Object { $_.Cap -eq 0 } | Sort-Object Crf | Select-Object -First 1 }
-
-                # Cap: ~20% above the busiest second at the chosen CRF, rounded up to 5 Mbps
-                $cap = [int]([math]::Ceiling($best.Peak * 1.2 / 5) * 5)
-
-                # The user's current settings, for comparison
-                $cur = $null
-                if (-not $Opt.AutoCrf) { $cur = & $measure $Opt.Crf $(if ($Opt.VbrEnabled) { [int][math]::Round($Opt.MaxRate) } else { 0 }) }
+                $r = Find-QualityCrf $file $Opt $T $Sync $tmp $index $onTest $onPoint -Compare
+                $best = $r.Best
 
                 $lines = @()
-                $lines += $baseInfo
-                $lines += ("Suggested: CRF {0} + {1} Mbps cap {2} ~{3} Mbps avg (~{4} GB per hour), VMAF {5}, worst 1% {6}" -f $best.Crf, $cap, $arrow, (Fmt $best.Avg '0'), (Fmt ($best.Avg * 0.45) '0'), (Fmt $best.Vmaf), (Fmt $best.Low))
-                if (-not $met) { $lines += ("Even CRF {0} stayed below VMAF {1}; this is the best tested." -f $best.Crf, (Fmt $T '0')) }
-                if ($cur) {
-                    $curLabel = if ($cur.Cap) { "CRF $($cur.Crf) + $($cur.Cap) Mbps cap" } else { "CRF $($cur.Crf), no cap" }
-                    $lines += ("Your current {0} {1} {2} Mbps, VMAF {3}, worst 1% {4}" -f $curLabel, $arrow, (Fmt $cur.Avg '0'), (Fmt $cur.Vmaf), (Fmt $cur.Low))
+                $lines += "{5} $dot {0}x{1} $dot source {2} Mbps $dot {3} sample(s) of {4} s" -f $r.Width, $r.Height, (Format-Num $r.SourceMbps '0'), $r.Samples, (Format-Num $r.SampleLength '0.#'), $Opt.CodecName
+                $lines += ("Suggested: CRF {0} + {1} Mbps cap {2} ~{3} Mbps avg (~{4} GB per hour), VMAF {5}, worst 1% {6}" -f $r.Crf, $r.Cap, $arrow, (Format-Num $best.Avg '0'), (Format-Num ($best.Avg * 0.45) '0'), (Format-Num $best.Vmaf), (Format-Num $best.Low))
+                if (-not $r.Met) { $lines += ("Even CRF {0} stayed below VMAF {1}; this is the best tested." -f $r.Crf, (Format-Num $T '0')) }
+                if ($r.Current) {
+                    $c = $r.Current
+                    $curLabel = if ($c.Cap) { "CRF $($c.Crf) + $($c.Cap) Mbps cap" } else { "CRF $($c.Crf), no cap" }
+                    $lines += ("Your current {0} {1} {2} Mbps, VMAF {3}, worst 1% {4}" -f $curLabel, $arrow, (Format-Num $c.Avg '0'), (Format-Num $c.Vmaf), (Format-Num $c.Low))
                 }
-                $tested = ($points.Values | Where-Object { $_.Cap -eq 0 } | Sort-Object Crf | ForEach-Object { "CRF {0}: {1} Mbps / VMAF {2}" -f $_.Crf, (Fmt $_.Avg '0'), (Fmt $_.Vmaf) }) -join "  $dot  "
-                $lines += "Tested: $tested"
+                $lines += "Tested: " + (($r.Points | ForEach-Object { "CRF {0}: {1} Mbps / VMAF {2}" -f $_.Crf, (Format-Num $_.Avg '0'), (Format-Num $_.Vmaf) }) -join "  $dot  ")
 
-                Set-Ana $file ("CRF {0} $dot {1} Mbps cap" -f $best.Crf, $cap) $(if ($met) { 'done' } else { 'error' }) 100 ($lines -join "`n")
-                $results += [pscustomobject]@{ Name = $name; Crf = $best.Crf; Cap = $cap; Met = $met }
+                Set-Ana $file ("CRF {0} $dot {1} Mbps cap" -f $r.Crf, $r.Cap) $(if ($r.Met) { 'done' } else { 'error' }) 100 ($lines -join "`n")
+                Post @{ T = 'aresult'; Path = $file; Crf = $r.Crf; Cap = $r.Cap; Grain = $r.Grain; Met = $r.Met; Target = $T; Key = $Opt.LookKey; CodecName = $Opt.CodecName; Vmaf = $best.Vmaf }
+                $results += [pscustomobject]@{ Name = $name; Crf = $r.Crf; Cap = $r.Cap; Met = $r.Met }
             }
             catch {
                 if ($Sync.Cancel) { Set-Ana $file 'Cancelled' 'cancelled' 0 $null; break }
@@ -911,7 +965,6 @@ $AnalyzeScript = {
     }
     Post $m
 }
-
 # ========== Theme (follows Windows light/dark mode and accent colour) ==========
 $IsLight = $true
 try { $IsLight = [int](Get-ItemPropertyValue 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' 'AppsUseLightTheme') -ne 0 } catch {}
@@ -1577,6 +1630,13 @@ $Xaml = @'
                           <StackPanel Grid.Column="1" VerticalAlignment="Center">
                             <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
                             <TextBlock Text="{Binding Detail}" Style="{StaticResource Caption}" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" Margin="0,2,0,0"/>
+                            <TextBlock Text="{Binding Note}" FontSize="12" Foreground="{StaticResource Accent}" TextTrimming="CharacterEllipsis" Margin="0,2,0,0">
+                              <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                  <Style.Triggers><Trigger Property="Text" Value=""><Setter Property="Visibility" Value="Collapsed"/></Trigger></Style.Triggers>
+                                </Style>
+                              </TextBlock.Style>
+                            </TextBlock>
                             <ProgressBar x:Name="bar" Value="{Binding Progress, Mode=OneWay}" Maximum="100" Height="3" Margin="0,6,0,0" Visibility="Collapsed"/>
                           </StackPanel>
                           <Border x:Name="badge" Grid.Column="2" CornerRadius="10" Padding="10,3" Margin="12,0,0,0" VerticalAlignment="Center" Background="{StaticResource Subtle}">
@@ -1614,7 +1674,7 @@ $Xaml = @'
                   <Grid Margin="4,2,4,10">
                     <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                     <TextBlock Style="{StaticResource Caption}" VerticalAlignment="Center" Margin="0,0,12,0"
-                               Text="Encodes short samples of the selected clips (all clips if none are selected) with your current look and grain settings, scores them against the source with VMAF, and suggests a CRF and bitrate cap. Several minutes per 6K clip."/>
+                               Text="Analyses each clip in the queue on its own (or only the clips you multi-select): short sample encodes with your current look and grain settings, scored against the source with VMAF, give each clip its own CRF and bitrate cap. Several minutes per 6K clip."/>
                     <ComboBox x:Name="cmbTarget" Grid.Column="1" Width="200" ToolTip="Quality target. VMAF 100 = indistinguishable from the source">
                       <ComboBoxItem Content="High (VMAF 93)"/>
                       <ComboBoxItem Content="Transparent (VMAF 95)" IsSelected="True"/>
@@ -1668,7 +1728,11 @@ $Xaml = @'
                     <Grid>
                       <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                       <TextBlock x:Name="txtAnaSummary" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,12,0"/>
-                      <Button x:Name="btnAnaApply" Grid.Column="1" Style="{StaticResource AccentButton}" Content="Apply"/>
+                      <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                        <Button x:Name="btnAnaPerClip" Style="{StaticResource AccentButton}" Content="Use per clip" Margin="0,0,8,0"
+                                ToolTip="Each analysed clip encodes with its own CRF and cap"/>
+                        <Button x:Name="btnAnaApply" Content="Apply to all" ToolTip="Use one CRF and cap for everything: the most demanding clip's CRF and the largest cap"/>
+                      </StackPanel>
                     </Grid>
                   </Border>
                 </Grid>
@@ -1750,6 +1814,20 @@ $Xaml = @'
                   <ComboBox x:Name="cmbCodec" Grid.Column="1" Width="150" VerticalAlignment="Center">
                     <ComboBoxItem Content="HEVC (x265)" IsSelected="True"/>
                     <ComboBoxItem Content="AV1 (SVT-AV1)"/>
+                  </ComboBox>
+                </Grid>
+                <Rectangle Style="{StaticResource DividerLine}"/>
+                <Grid>
+                  <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                  <StackPanel VerticalAlignment="Center">
+                    <TextBlock Text="Quality target"/>
+                    <TextBlock x:Name="txtTargetHint" Style="{StaticResource Caption}" Margin="0,2,12,0"/>
+                  </StackPanel>
+                  <ComboBox x:Name="cmbQualityTarget" Grid.Column="1" Width="150" VerticalAlignment="Center" ToolTip="VMAF 100 = indistinguishable from the source">
+                    <ComboBoxItem Content="Off (use CRF)" IsSelected="True"/>
+                    <ComboBoxItem Content="VMAF 93"/>
+                    <ComboBoxItem Content="VMAF 95"/>
+                    <ComboBoxItem Content="VMAF 97"/>
                   </ComboBox>
                 </Grid>
                 <Rectangle Style="{StaticResource DividerLine}"/>
@@ -1926,6 +2004,8 @@ $script:Tick        = 0
 $lstQueue.ItemsSource = $script:Items
 $script:AnaItems    = New-Object 'System.Collections.ObjectModel.ObservableCollection[IdealVE.QueueItem]'
 $script:AnaSuggest  = $null
+$script:AnaResults    = @{}   # path -> latest analysis result (not yet applied)
+$script:ClipOverrides = @{}   # path -> per-clip CRF/cap/grain chosen by analysis ("Use per clip" or a quality-target run)
 $lstAnalysis.ItemsSource = $script:AnaItems
 
 # ========== UI helpers ==========
@@ -2022,10 +2102,31 @@ function Update-QueueState {
     Update-OutputPreview
 }
 
+# Everything a measured CRF depends on; a per-clip result is only reused when this matches
+function Get-LookKey {
+    "{0}|{1}|{2}|{3}|{4}" -f (Get-Codec), ([math]::Round($sldEv.Value, 1)).ToString($inv), (Get-CurrentLut), $cmbGrain.SelectedIndex, [bool]$chkAutoGrain.IsChecked
+}
+function Get-QualityTarget { @(0, 93, 95, 97)[[math]::Max(0, $cmbQualityTarget.SelectedIndex)] }
+
+function Update-OverrideNotes {
+    $key = Get-LookKey
+    foreach ($it in $script:Items) {
+        $ov = $script:ClipOverrides[$it.Path]
+        if (-not $ov) { $it.Note = ''; continue }
+        $text = "Analysed for VMAF {0}: {1} CRF {2}, {3} Mbps cap" -f $ov.Target, $ov.CodecName, $ov.Crf, $ov.Cap
+        $it.Note = if ($ov.Key -eq $key) { $text } else { "$text (made with different settings, not used)" }
+    }
+}
+
 function Update-Enablement {
-    $txtCrf.IsEnabled = -not $chkAutoCrf.IsChecked
+    $target = (Get-QualityTarget) -gt 0
+    $txtCrf.IsEnabled = -not $chkAutoCrf.IsChecked -and -not $target
+    $chkAutoCrf.IsEnabled = -not $target
+    $txtTargetHint.Text = if ($target) { 'Each clip is measured first to pick its CRF and cap. Slower.' } else { 'Or measure each clip to hit a VMAF score.' }
     $cmbGrain.IsEnabled = -not $chkAutoGrain.IsChecked
-    $txtMaxRate.IsEnabled = [bool]$chkVbr.IsChecked
+    $txtMaxRate.IsEnabled = [bool]$chkVbr.IsChecked -and -not $target
+    $txtMaxRate.ToolTip = if ($target) { 'With a quality target, each clip''s cap comes from its measurement' } else { $null }
+    Update-OverrideNotes
     $txtOutFolder.IsEnabled = [bool]$rbCustom.IsChecked
     $btnOutFolder.IsEnabled = [bool]$rbCustom.IsChecked
     $txtCsvPath.Text = $script:CsvPath
@@ -2094,7 +2195,7 @@ function Save-Settings {
         $s = [ordered]@{
             LutPath = $script:LutPath; LutEnabled = [bool]$chkLut.IsChecked
             Codec = (Get-Codec); AutoCrf = [bool]$chkAutoCrf.IsChecked; CrfHevc = $(if ((Get-Codec) -eq 'hevc') { $txtCrf.Text } else { $script:CrfByCodec.hevc }); CrfAv1 = $(if ((Get-Codec) -eq 'av1') { $txtCrf.Text } else { $script:CrfByCodec.av1 })
-            AutoGrain = [bool]$chkAutoGrain.IsChecked; GrainLevel = $cmbGrain.SelectedIndex
+            AutoGrain = [bool]$chkAutoGrain.IsChecked; GrainLevel = $cmbGrain.SelectedIndex; QualityTarget = (Get-QualityTarget)
             VbrEnabled = [bool]$chkVbr.IsChecked; MaxRate = $txtMaxRate.Text
             OutputMode = (Get-OutputMode); OutputFolder = $txtOutFolder.Text.Trim(); Subfolder = $txtSubfolder.Text
             CsvEnabled = [bool]$chkCsv.IsChecked; CsvPath = $script:CsvPath
@@ -2122,6 +2223,7 @@ function Import-SettingsCore {
         if ($s.CrfAv1) { $script:CrfByCodec.av1 = [string]$s.CrfAv1 }
         if ($s.Codec -eq 'av1') { $cmbCodec.SelectedIndex = 1 }
         $chkAutoGrain.IsChecked = [bool]$s.AutoGrain
+        $ti = [array]::IndexOf(@(0, 93, 95, 97), [int]$s.QualityTarget); if ($ti -gt 0) { $cmbQualityTarget.SelectedIndex = $ti }
         if ($null -ne $s.GrainLevel -and [int]$s.GrainLevel -ge 0 -and [int]$s.GrainLevel -le 2) { $cmbGrain.SelectedIndex = [int]$s.GrainLevel }
         $chkVbr.IsChecked = [bool]$s.VbrEnabled; if ($s.MaxRate) { $txtMaxRate.Text = $s.MaxRate }
         if ($s.OutputMode -eq 'custom') { $rbCustom.IsChecked = $true }
@@ -2356,6 +2458,8 @@ function Get-RunOptions([switch]$Analysis) {
         if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) { Show-Warning "$tool.exe was not found in PATH."; return $null }
     }
     $o = @{}
+    $o.QualityTarget = Get-QualityTarget
+    $o.LookKey = Get-LookKey
     $o.AutoCrf = [bool]$chkAutoCrf.IsChecked
     $o.AutoGrain = [bool]$chkAutoGrain.IsChecked
 
@@ -2365,7 +2469,7 @@ function Get-RunOptions([switch]$Analysis) {
     $maxCrf = if ($o.Codec -eq 'av1') { 63 } else { 51 }
     $crf = 0
     if (-not [int]::TryParse($txtCrf.Text.Trim(), [ref]$crf) -or $crf -lt 0 -or $crf -gt $maxCrf) {
-        if (-not $o.AutoCrf) { Show-Warning "CRF must be a whole number from 0 to $maxCrf for $($o.CodecName)."; return $null }
+        if (-not $o.AutoCrf -and -not $o.QualityTarget) { Show-Warning "CRF must be a whole number from 0 to $maxCrf for $($o.CodecName)."; return $null }
         $crf = if ($o.Codec -eq 'av1') { ConvertTo-Av1Crf 21 } else { 21 }
     }
     $o.Crf = $crf
@@ -2373,7 +2477,7 @@ function Get-RunOptions([switch]$Analysis) {
 
     $o.VbrEnabled = [bool]$chkVbr.IsChecked
     $rate = 0.0
-    if ($o.VbrEnabled -and (-not [double]::TryParse($txtMaxRate.Text.Trim(), [System.Globalization.NumberStyles]::Float, $inv, [ref]$rate) -or $rate -le 0)) {
+    if ($o.VbrEnabled -and -not $o.QualityTarget -and (-not [double]::TryParse($txtMaxRate.Text.Trim(), [System.Globalization.NumberStyles]::Float, $inv, [ref]$rate) -or $rate -le 0)) {
         Show-Warning 'Max rate must be a positive number of Mbps.'; return $null
     }
     $o.MaxRate = $rate
@@ -2424,6 +2528,8 @@ function Start-Run {
     if ($pending.Count -eq 0) { Write-Log 'The queue is empty.'; Set-RunState 'idle'; return }
 
     foreach ($it in $pending) { $it.Status = 'Waiting'; $it.StatusKey = 'waiting'; $it.Progress = 0; $it.Detail = $it.Info }
+    $opt.Overrides = @{}
+    foreach ($it in $pending) { if ($script:ClipOverrides.ContainsKey($it.Path)) { $opt.Overrides[$it.Path] = $script:ClipOverrides[$it.Path] } }
     Save-Settings
     Start-Worker $WorkerScript @($pending | ForEach-Object { $_.Path }) $opt
 
@@ -2450,8 +2556,9 @@ function Start-Worker([scriptblock]$body, [string[]]$jobs, [hashtable]$opt) {
 
 function Start-Analysis {
     if ($script:Worker -or $script:RunState -ne 'idle') { return }
+    # Every clip, each analysed on its own; a multi-selection narrows it (the first clip is always auto-selected)
     $targets = @($lstQueue.SelectedItems)
-    if ($targets.Count -eq 0) { $targets = @($script:Items) }
+    if ($targets.Count -lt 2) { $targets = @($script:Items) }
     if ($targets.Count -eq 0) { Show-Warning 'Add some clips first.'; return }
     $vmafOk = (Invoke-Hidden 'ffmpeg' @('-hide_banner', '-filters')) -match '\blibvmaf\b'
     if (-not $vmafOk) { Show-Warning 'Your ffmpeg build has no libvmaf filter, which the analysis needs. The gyan.dev "full" build includes it.'; return }
@@ -2460,6 +2567,7 @@ function Start-Analysis {
     $opt.TargetVmaf = @(93, 95, 97)[[math]::Max(0, $cmbTarget.SelectedIndex)]
 
     $script:AnaItems.Clear()
+    $script:AnaResults = @{}
     $script:AnaSuggest = $null
     $bdrAnaSummary.Visibility = 'Collapsed'
     foreach ($t in $targets) {
@@ -2508,6 +2616,13 @@ function Receive-WorkerMessages {
                     if ($m.ContainsKey('Detail')) { $it.Detail = $m.Detail }
                 }
             }
+            'aresult' {
+                $script:AnaResults[$m.Path] = @{ Crf = $m.Crf; Cap = $m.Cap; Grain = $m.Grain; Target = $m.Target; Key = $m.Key; CodecName = $m.CodecName; Met = $m.Met; Vmaf = $m.Vmaf }
+            }
+            'override' {
+                $script:ClipOverrides[$m.Path] = @{ Crf = $m.Crf; Cap = $m.Cap; Grain = $m.Grain; Target = $m.Target; Key = $m.Key; CodecName = $m.CodecName; Met = $m.Met; Vmaf = $m.Vmaf }
+                Update-OverrideNotes
+            }
             'aend' {
                 $txtOverall.Text = 'Analysis finished'
                 $txtEta.Text = $(if ($m.Cancelled) { 'cancelled' } else { "$($m.Count) clip(s)" }) + " $dot " + $m.Elapsed.ToString('hh\:mm\:ss')
@@ -2515,9 +2630,9 @@ function Receive-WorkerMessages {
                 if ($m.Count) {
                     $script:AnaSuggest = @{ Crf = [int]$m.Crf; Cap = [int]$m.Cap }
                     $txtAnaSummary.Text = if ($m.Count -gt 1) {
-                        "Suggested for all {0} clips: CRF {1} with a {2} Mbps cap (the most demanding clip's CRF and the largest cap)." -f $m.Count, $m.Crf, $m.Cap
-                    } else { "Suggested: CRF {0} with a {1} Mbps cap." -f $m.Crf, $m.Cap }
-                    $btnAnaApply.Content = "Apply CRF $($m.Crf) + $($m.Cap) Mbps"
+                        "Each clip has its own suggestion. Use them per clip, or apply CRF {0} with a {1} Mbps cap to everything (the most demanding clip's CRF and the largest cap)." -f $m.Crf, $m.Cap
+                    } else { "Suggested: CRF {0} with a {1} Mbps cap. Use it for this clip only, or apply it to everything." -f $m.Crf, $m.Cap }
+                    $btnAnaApply.Content = "Apply to all (CRF $($m.Crf), $($m.Cap) Mbps)"
                     $bdrAnaSummary.Visibility = 'Visible'
                 }
                 Write-Log ("Analysis finished{0}." -f $(if ($m.Count) { ": CRF $($m.Crf), cap $($m.Cap) Mbps" } else { '' }))
@@ -2581,12 +2696,13 @@ $btnAdd.Add_Click({
 })
 
 $btnRemove.Add_Click({
-    foreach ($it in @($lstQueue.SelectedItems)) { [void]$script:Items.Remove($it) }
+    foreach ($it in @($lstQueue.SelectedItems)) { [void]$script:Items.Remove($it); [void]$script:ClipOverrides.Remove($it.Path) }
     Update-QueueState
 })
 
 $btnClear.Add_Click({
     $script:Items.Clear()
+    $script:ClipOverrides.Clear()
     Write-Log 'Queue cleared.'
     Update-QueueState
 })
@@ -2596,7 +2712,7 @@ $lstQueue.Add_MouseDoubleClick({ param($sender, $e)
     if ($e.OriginalSource -is [System.Windows.FrameworkElement] -and $e.OriginalSource.DataContext -is [IdealVE.QueueItem]) { Start-Preview }
 })
 $lstQueue.Add_KeyDown({ param($sender, $e)
-    if ($e.Key -eq 'Delete' -and $btnRemove.IsEnabled) { foreach ($it in @($lstQueue.SelectedItems)) { [void]$script:Items.Remove($it) }; Update-QueueState; $e.Handled = $true }
+    if ($e.Key -eq 'Delete' -and $btnRemove.IsEnabled) { foreach ($it in @($lstQueue.SelectedItems)) { [void]$script:Items.Remove($it); [void]$script:ClipOverrides.Remove($it.Path) }; Update-QueueState; $e.Handled = $true }
     elseif ($e.Key -eq 'Return') { Start-Preview; $e.Handled = $true }
 })
 
@@ -2617,14 +2733,17 @@ $btnLut.Add_Click({
     if ($script:LutPath) { $dlg.InitialDirectory = [IO.Path]::GetDirectoryName($script:LutPath) }
     if ($dlg.ShowDialog($window)) {
         Set-LutPath $dlg.FileName
+        Update-OverrideNotes
         $chkLut.IsChecked = $true
         Write-Log "LUT: $($dlg.FileName)"
         Request-PreviewUpdate
     }
 })
-$chkLut.Add_Checked({ Request-PreviewUpdate })
-$chkLut.Add_Unchecked({ Request-PreviewUpdate })
-$sldEv.Add_ValueChanged({ Update-EvLabel; Request-PreviewUpdate })
+$chkLut.Add_Checked({ Request-PreviewUpdate; Update-OverrideNotes })
+$chkLut.Add_Unchecked({ Request-PreviewUpdate; Update-OverrideNotes })
+$cmbGrain.Add_SelectionChanged({ Update-OverrideNotes })
+$cmbQualityTarget.Add_SelectionChanged({ Update-Enablement })
+$sldEv.Add_ValueChanged({ Update-EvLabel; Request-PreviewUpdate; Update-OverrideNotes })
 $sldEv.Add_MouseDoubleClick({ $sldEv.Value = 0 })
 $btnEvReset.Add_Click({ $sldEv.Value = 0 })
 
@@ -2638,6 +2757,7 @@ $cmbCodec.Add_SelectionChanged({
     $script:LastCodec = $new
     Update-CodecUi
     Update-OutputPreview
+    Update-OverrideNotes
 })
 
 # Encoding + output toggles
@@ -2704,8 +2824,20 @@ $btnCancel.Add_Click({
 
 # Analysis
 $btnAnalyze.Add_Click({ Start-Analysis })
+$btnAnaPerClip.Add_Click({
+    $n = 0
+    foreach ($path in @($script:AnaResults.Keys)) {
+        if (Find-QueueItem $path) { $script:ClipOverrides[$path] = $script:AnaResults[$path]; $n++ }
+    }
+    Update-OverrideNotes
+    Write-Log "Per-clip settings applied to $n clip(s); each will encode with its own CRF and cap."
+    $tabMain.SelectedItem = $tabQueue
+})
 $btnAnaApply.Add_Click({
     if (-not $script:AnaSuggest) { return }
+    # One setting for everything: drop the per-clip results for the analysed clips and the quality target
+    foreach ($path in @($script:AnaResults.Keys)) { [void]$script:ClipOverrides.Remove($path) }
+    $cmbQualityTarget.SelectedIndex = 0
     $chkAutoCrf.IsChecked = $false
     $txtCrf.Text = [string]$script:AnaSuggest.Crf
     $chkVbr.IsChecked = $true
