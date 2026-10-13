@@ -1,0 +1,133 @@
+// Ideal Video Encoder for macOS
+// https://github.com/alex-mcdermott/Ideal-Video-Encoder
+// Copyright (C) 2026 the Ideal Video Encoder contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+import Foundation
+
+public enum Codec: String, Codable, Sendable, CaseIterable, Identifiable {
+    case hevc, av1
+    public var id: String { rawValue }
+    public var displayName: String { self == .av1 ? "AV1" : "HEVC" }
+    public var menuName: String { self == .av1 ? "AV1 (SVT-AV1)" : "HEVC (x265)" }
+    /// AV1 cannot be written to MOV, so it goes to MP4.
+    public var fileExtension: String { self == .av1 ? ".MP4" : ".MOV" }
+    public var maxCrf: Int { self == .av1 ? 63 : 51 }
+}
+
+public enum Grain: Int, Codable, Sendable, CaseIterable, Identifiable {
+    case off = 0, light = 1, strong = 2
+    public var id: Int { rawValue }
+    public var name: String { ["Off", "Light", "Strong"][rawValue] }
+}
+
+/// The filter graph shared by encode and analysis: exposure -> LUT -> range remap.
+public enum FilterChain {
+    /// Escape a path for a lavfi option value inside single quotes. Two parsing levels see it
+    /// (the filtergraph, then the option string), hence the doubled escapes.
+    /// The Windows script also turns `\` into `/`; on macOS a backslash is an ordinary file-name
+    /// character, so it is escaped instead.
+    public static func lavfiPath(_ path: String) -> String {
+        var p = path.replacingOccurrences(of: "\\", with: "\\\\")
+        p = p.replacingOccurrences(of: ":", with: "\\:")
+        p = p.replacingOccurrences(of: "'", with: "'\\\\\\''")
+        return "'" + p + "'"
+    }
+
+    /// Exposure in stops as a luma offset of 0.0738 per stop (the F-Log2 slope), at 10-bit precision.
+    public static func exposureFilter(_ ev: Double) -> String {
+        let k = Fmt.num(Fmt.round(abs(ev) * 0.0738, 4))
+        return "lutyuv=y=val\(ev < 0 ? "-" : "+")\(k)*(maxval-minval)"
+    }
+
+    public static func filters(exposure: Double, lutPath: String?, isFullRange: Bool) -> [String] {
+        var vf: [String] = []
+        let ev = Fmt.round(exposure, 2)
+        if ev != 0 { vf.append(exposureFilter(ev)) }
+        if let lut = lutPath, !lut.isEmpty {
+            vf.append("format=gbrp10le")
+            vf.append("lut3d=file=" + lavfiPath(lut))
+        }
+        if isFullRange { vf.append("zscale=rangein=full:range=limited:matrix=709") }
+        return vf
+    }
+}
+
+public enum CodecArgs {
+    /// x265 tuning per grain level, copied from `Get-X265Args`.
+    public static func x265(_ grain: Grain) -> [String] {
+        switch grain {
+        case .light: return ["-x265-params", "aq-mode=3:aq-strength=1.0:psy-rd=2:psy-rdoq=4:qg-size=16:sao=0:strong-intra-smoothing=0:deblock=-1,-1:rect=1:amp=1"]
+        case .strong: return ["-tune", "grain", "-x265-params", "qg-size=16:rect=1:amp=1"]
+        case .off: return ["-x265-params", "aq-mode=3:aq-strength=1.2:psy-rd=2:psy-rdoq=1:qg-size=16:sao=1:rect=1:amp=1"]
+        }
+    }
+
+    /// `Get-VideoCodecArgs`: CRF, optional VBV cap in Mbps (0 = none), grain, 10-bit 4:2:0.
+    public static func video(codec: Codec, crf: Int, cap: Double, grain: Grain, width: Int = 0, height: Int = 0) -> [String] {
+        var vbv: [String] = []
+        if cap > 0 { vbv = ["-maxrate", Fmt.num(cap) + "M", "-bufsize", Fmt.num(cap * 2) + "M"] }
+        if codec == .av1 {
+            var p = "tune=0"
+            if grain == .light { p += ":film-grain=6:film-grain-denoise=0" } else if grain == .strong { p += ":film-grain=12:film-grain-denoise=0" }
+            // SVT-AV1 only allows preset 5+ above 4K ("8K class")
+            let preset = (width > 4096 || height > 2304) ? 5 : 4
+            return ["-c:v", "libsvtav1", "-preset", "\(preset)", "-crf", "\(crf)"] + vbv + ["-svtav1-params", p, "-pix_fmt", "yuv420p10le"]
+        }
+        return ["-c:v", "libx265", "-preset", "slow", "-crf", "\(crf)"] + vbv + x265(grain) + ["-pix_fmt", "yuv420p10le", "-tag:v", "hvc1"]
+    }
+
+    /// `ConvertTo-Av1Crf`: rough HEVC -> SVT-AV1 CRF equivalence.
+    public static func av1Crf(fromHevc crf: Int) -> Int { max(0, min(63, crf + 7)) }
+
+    public static let audio = ["-c:a", "aac", "-b:a", "320k", "-ar", "48000", "-ac", "2"]
+    public static let colorTags = ["-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv"]
+}
+
+/// The full ffmpeg command for one clip, as the worker builds it.
+public struct EncodeCommand: Sendable, Equatable {
+    public var source: String
+    public var output: String
+    public var codec: Codec
+    public var crf: Int
+    public var grain: Grain
+    public var cap: Double          // 0 = no cap
+    public var exposure: Double
+    public var lutPath: String?
+    public var isFullRange: Bool
+    public var width: Int
+    public var height: Int
+    public var trimStart: Double?
+    public var trimEnd: Double?
+
+    public init(source: String, output: String, codec: Codec, crf: Int, grain: Grain, cap: Double, exposure: Double,
+                lutPath: String?, isFullRange: Bool, width: Int, height: Int, trimStart: Double? = nil, trimEnd: Double? = nil) {
+        self.source = source; self.output = output; self.codec = codec; self.crf = crf; self.grain = grain; self.cap = cap
+        self.exposure = exposure; self.lutPath = lutPath; self.isFullRange = isFullRange; self.width = width; self.height = height
+        self.trimStart = trimStart; self.trimEnd = trimEnd
+    }
+
+    public var filters: [String] { FilterChain.filters(exposure: exposure, lutPath: lutPath, isFullRange: isFullRange) }
+
+    public var arguments: [String] {
+        var a = ["-y", "-nostdin", "-hide_banner"]
+        if let s = trimStart { a += ["-ss", Fmt.num(s)] }
+        if let e = trimEnd { a += ["-to", Fmt.num(e)] }
+        a += ["-i", source]
+        let vf = filters
+        if !vf.isEmpty { a += ["-vf", vf.joined(separator: ",")] }
+        a += CodecArgs.video(codec: codec, crf: crf, cap: cap, grain: grain, width: width, height: height)
+        a += CodecArgs.audio
+        a += CodecArgs.colorTags + ["-movflags", "+faststart"]
+        a.append(output)
+        return a
+    }
+
+    /// Expected output duration, for progress.
+    public static func targetDuration(source: Double, trimStart: Double?, trimEnd: Double?) -> Double {
+        if let s = trimStart, let e = trimEnd { return e - s }
+        if let e = trimEnd { return e }
+        if let s = trimStart { return source - s }
+        return source
+    }
+}
