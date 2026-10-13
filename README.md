@@ -1,6 +1,6 @@
 # Ideal Video Encoder
 
-A Windows app that turns large in-camera video files into compact, high-quality 10-bit HEVC (H.265) or AV1 — with a live LUT and exposure preview, a batch queue, and a built-in analyser that measures your own footage to suggest encoder settings.
+A Windows and Mac app that turns large in-camera video files into compact, high-quality 10-bit HEVC (H.265) or AV1 files — with a live LUT and exposure adjustment preview, a batch queue, full metadata cloning and a built-in analyser that measures your own footage to suggest encoder settings.
 
 It was built around Fujifilm footage (X-H2S 6.2K open gate, X-T5 6.2K/4K, F-Log2) but works with any `.MOV` or `.MP4` that FFmpeg can read.
 
@@ -15,7 +15,7 @@ It was built around Fujifilm footage (X-H2S 6.2K open gate, X-T5 6.2K/4K, F-Log2
 - **Grain retention** levels (Off / Light / Strong): x265 grain tuning for HEVC, film-grain synthesis for AV1, plus an Auto mode.
 - **Settings analyser**: encodes short samples of each clip, scores them against the source with [VMAF](https://github.com/Netflix/vmaf), and finds the CRF and bitrate cap that hit a quality target. Use the result per clip or for everything.
 - **Quality target mode**: pick a VMAF score instead of a CRF, and every clip is measured just before it's encoded and gets its own CRF and cap.
-- **Batch queue** with per-clip progress, ETA, cancel, scheduled start (4 am / 1 pm / 7 pm) and an optional CSV log.
+- **Batch queue** with per-clip progress, ETA, cancel, a scheduled start at any time you choose (in your PC's time zone, daylight-saving aware) and an optional CSV log.
 - **Metadata kept**: capture date, camera, lens, film simulation, GPS and more are copied with ExifTool, including Apple-compatible keys, and file dates are set to the capture time.
 - **Flexible output**: next to each source clip or in a chosen folder, with an optional subfolder. Never overwrites a source file.
 - **Windows 11 design** that follows your light/dark mode and accent colour, with per-monitor high-DPI support.

@@ -1960,17 +1960,16 @@ $Xaml = @'
         <Border Grid.Row="1" Style="{StaticResource Card}" Margin="0,12,0,0">
           <StackPanel>
             <Grid>
-              <TextBlock x:Name="txtOverall" Text="Ready" FontWeight="SemiBold"/>
-              <TextBlock x:Name="txtEta" Style="{StaticResource Caption}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+              <TextBlock x:Name="txtOverall" Text="Ready" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" Margin="0,0,10,0"/>
+              <TextBlock x:Name="txtEta" Grid.Column="1" Style="{StaticResource Caption}" TextWrapping="NoWrap" VerticalAlignment="Center"/>
             </Grid>
             <ProgressBar x:Name="prgOverall" Maximum="100" Margin="0,10,0,14"/>
             <Grid>
               <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
               <ComboBox x:Name="cmbStart" Width="104" ToolTip="When to start">
                 <ComboBoxItem Content="Now" IsSelected="True"/>
-                <ComboBoxItem Content="4 am"/>
-                <ComboBoxItem Content="1 pm"/>
-                <ComboBoxItem Content="7 pm"/>
+                <ComboBoxItem Content="Later at"/>
               </ComboBox>
               <Button x:Name="btnStart" Grid.Column="1" Style="{StaticResource AccentButton}" Margin="8,0">
                 <StackPanel Orientation="Horizontal">
@@ -1979,6 +1978,11 @@ $Xaml = @'
                 </StackPanel>
               </Button>
               <Button x:Name="btnCancel" Grid.Column="2" Content="Cancel" IsEnabled="False"/>
+            </Grid>
+            <Grid x:Name="pnlSchedule" Margin="0,10,0,0" Visibility="Collapsed">
+              <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+              <TextBox x:Name="txtStartTime" Width="104" HorizontalContentAlignment="Center" Tag="e.g. 04:30" ToolTip="Any time: 04:30, 4:30 pm, 0430, 4pm"/>
+              <TextBlock x:Name="txtScheduleHint" Grid.Column="1" Style="{StaticResource Caption}" VerticalAlignment="Center" Margin="10,0,0,0"/>
             </Grid>
           </StackPanel>
         </Border>
@@ -2238,7 +2242,7 @@ function Save-Settings {
         $s = [ordered]@{
             LutPath = $script:LutPath; LutEnabled = [bool]$chkLut.IsChecked
             Codec = (Get-Codec); AutoCrf = [bool]$chkAutoCrf.IsChecked; CrfHevc = $(if ((Get-Codec) -eq 'hevc') { $txtCrf.Text } else { $script:CrfByCodec.hevc }); CrfAv1 = $(if ((Get-Codec) -eq 'av1') { $txtCrf.Text } else { $script:CrfByCodec.av1 })
-            AutoGrain = [bool]$chkAutoGrain.IsChecked; GrainLevel = $cmbGrain.SelectedIndex; QualityTarget = (Get-QualityTarget)
+            AutoGrain = [bool]$chkAutoGrain.IsChecked; GrainLevel = $cmbGrain.SelectedIndex; QualityTarget = (Get-QualityTarget); ScheduleTime = $txtStartTime.Text.Trim()
             VbrEnabled = [bool]$chkVbr.IsChecked; MaxRate = $txtMaxRate.Text
             OutputMode = (Get-OutputMode); OutputFolder = $txtOutFolder.Text.Trim(); Subfolder = $txtSubfolder.Text
             CsvEnabled = [bool]$chkCsv.IsChecked; CsvPath = $script:CsvPath
@@ -2256,7 +2260,7 @@ function Import-SettingsCore {
     $chkAutoGrain.IsChecked = $false; $cmbGrain.SelectedIndex = 0
     $chkVbr.IsChecked = $true; $txtMaxRate.Text = '35'
     $rbSource.IsChecked = $true; $txtOutFolder.Text = ''; $txtSubfolder.Text = 'From FFmpeg'
-    $chkCsv.IsChecked = $false
+    $chkCsv.IsChecked = $false; $txtStartTime.Text = '04:00'
     if (-not (Test-Path -LiteralPath $SettingsPath)) { return }
     try {
         $s = Get-Content -LiteralPath $SettingsPath -Raw | ConvertFrom-Json
@@ -2267,6 +2271,7 @@ function Import-SettingsCore {
         if ($s.Codec -eq 'av1') { $cmbCodec.SelectedIndex = 1 }
         $chkAutoGrain.IsChecked = [bool]$s.AutoGrain
         $ti = [array]::IndexOf(@(0, 93, 95, 97), [int]$s.QualityTarget); if ($ti -gt 0) { $cmbQualityTarget.SelectedIndex = $ti }
+        if ($s.ScheduleTime) { $txtStartTime.Text = [string]$s.ScheduleTime }
         if ($null -ne $s.GrainLevel -and [int]$s.GrainLevel -ge 0 -and [int]$s.GrainLevel -le 2) { $cmbGrain.SelectedIndex = [int]$s.GrainLevel }
         $chkVbr.IsChecked = [bool]$s.VbrEnabled; if ($s.MaxRate) { $txtMaxRate.Text = $s.MaxRate }
         if ($s.OutputMode -eq 'custom') { $rbCustom.IsChecked = $true }
@@ -2475,22 +2480,65 @@ $previewDebounce.Add_Tick({ $previewDebounce.Stop(); Update-Preview })
 function Request-PreviewUpdate { if ($script:PreviewPath) { $previewDebounce.Stop(); $previewDebounce.Start() } }
 
 # ========== Conversion run ==========
-function Get-NextStart([string]$label) {
-    $targetHour = @{ "Now" = $null; "4 am" = 4; "1 pm" = 13; "7 pm" = 19 }[$label]
-    if ($null -eq $targetHour) { return Get-Date }
-    $now = Get-Date
-    $t = $now.Date.AddHours($targetHour)
-    if ($t -le $now) { $t = $t.AddDays(1) }
-    return $t
+# "04:30", "4:30", "4.30", "0430", "16:45", "4:30 pm", "4pm" -> time of day; $null if not a time
+function ConvertTo-TimeOfDay([string]$text) {
+    $s = ("$text".Trim().ToLowerInvariant() -replace '\s+', '') -replace '\.', ':'
+    if ($s -notmatch '^(\d{1,2})(?::?(\d{2}))?(am|pm|a|p)?$') { return $null }
+    $h = [int]$matches[1]; $m = if ($matches[2]) { [int]$matches[2] } else { 0 }; $ap = $matches[3]
+    if ($ap) {
+        if ($h -lt 1 -or $h -gt 12) { return $null }
+        if ($ap -like 'p*' -and $h -lt 12) { $h += 12 }
+        if ($ap -like 'a*' -and $h -eq 12) { $h = 0 }
+    }
+    if ($h -gt 23 -or $m -gt 59) { return $null }
+    return New-TimeSpan -Hours $h -Minutes $m
+}
+
+# Next occurrence of a local time of day in this PC's time zone, returned in UTC so the countdown stays right
+# across daylight-saving changes. A time skipped by the spring-forward gap starts just after the gap.
+function Get-NextStartUtc([TimeSpan]$timeOfDay, [DateTime]$nowUtc = [DateTime]::UtcNow) {
+    $tz = [TimeZoneInfo]::Local
+    $nowLocal = [TimeZoneInfo]::ConvertTimeFromUtc($nowUtc, $tz)
+    foreach ($day in 0, 1, 2) {
+        $local = [DateTime]::SpecifyKind($nowLocal.Date.AddDays($day).Add($timeOfDay), [DateTimeKind]::Unspecified)
+        if ($tz.IsInvalidTime($local)) { $local = $local.AddHours(1) }
+        $utc = [TimeZoneInfo]::ConvertTimeToUtc($local, $tz)
+        if ($utc -gt $nowUtc) { return $utc }
+    }
+}
+
+function Format-LocalStart([DateTime]$utc, [switch]$NoZone) {
+    $tz = [TimeZoneInfo]::Local
+    $local = [TimeZoneInfo]::ConvertTimeFromUtc($utc, $tz)
+    $zone = if ($tz.IsDaylightSavingTime($local)) { $tz.DaylightName } else { $tz.StandardName }
+    if ($NoZone) { return "{0} {1}" -f $local.ToString('ddd'), $local.ToShortTimeString() }
+    return "{0} {1} {2}" -f $local.ToString('ddd'), $local.ToShortTimeString(), $zone
+}
+
+function Format-Countdown([TimeSpan]$span) {
+    if ($span.TotalSeconds -lt 0) { $span = [TimeSpan]::Zero }
+    return "{0}:{1:mm\:ss}" -f [int][math]::Floor($span.TotalHours), $span
+}
+
+function Update-ScheduleUi {
+    $later = $cmbStart.SelectedIndex -eq 1
+    $pnlSchedule.Visibility = if ($later) { 'Visible' } else { 'Collapsed' }
+    if (-not $later) { return }
+    $tod = ConvertTo-TimeOfDay $txtStartTime.Text
+    if ($null -eq $tod) { $txtScheduleHint.Text = 'Enter a time, e.g. 04:30 or 4:30 pm.'; return }
+    $utc = Get-NextStartUtc $tod
+    $left = $utc - [DateTime]::UtcNow
+    $in = if ($left.TotalMinutes -lt 1) { 'in under a minute' } elseif ($left.TotalHours -lt 1) { "in {0} min" -f [int][math]::Ceiling($left.TotalMinutes) } else { "in {0} h {1} min" -f [int][math]::Floor($left.TotalHours), $left.Minutes }
+    $txtScheduleHint.Text = "Starts {0}, {1}" -f (Format-LocalStart $utc), $in
 }
 
 function Set-RunState([string]$state) {
     $script:RunState = $state
     switch ($state) {
-        'idle'      { $btnStart.IsEnabled = $true;  $txtStartLabel.Text = 'Start';      $btnCancel.IsEnabled = $false; $cmbStart.IsEnabled = $true }
-        'scheduled' { $btnStart.IsEnabled = $true;  $txtStartLabel.Text = 'Start now';  $btnCancel.IsEnabled = $true;  $cmbStart.IsEnabled = $false }
-        'running'   { $btnStart.IsEnabled = $false; $txtStartLabel.Text = 'Converting'; $btnCancel.IsEnabled = $true;  $cmbStart.IsEnabled = $false }
-        'analysing' { $btnStart.IsEnabled = $false; $txtStartLabel.Text = 'Start';      $btnCancel.IsEnabled = $true;  $cmbStart.IsEnabled = $false }
+        'idle'      { $btnStart.IsEnabled = $true;  $txtStartLabel.Text = 'Start';      $btnCancel.IsEnabled = $false; $cmbStart.IsEnabled = $true; $txtStartTime.IsEnabled = $true }
+        'scheduled' { $btnStart.IsEnabled = $true;  $txtStartLabel.Text = 'Start now';  $btnCancel.IsEnabled = $true;  $cmbStart.IsEnabled = $false; $txtStartTime.IsEnabled = $false }
+        'running'   { $btnStart.IsEnabled = $false; $txtStartLabel.Text = 'Converting'; $btnCancel.IsEnabled = $true;  $cmbStart.IsEnabled = $false; $txtStartTime.IsEnabled = $false }
+        'analysing' { $btnStart.IsEnabled = $false; $txtStartLabel.Text = 'Start';      $btnCancel.IsEnabled = $true;  $cmbStart.IsEnabled = $false; $txtStartTime.IsEnabled = $false }
     }
     Update-QueueState
 }
@@ -2721,9 +2769,11 @@ $pump.Add_Tick({
         if ($script:Tick % 10 -eq 0) {
             if ($script:Cpu) { try { $txtCpu.Text = 'CPU ' + [math]::Round($script:Cpu.NextValue()) + '%' } catch {} }
             if ($script:RunState -eq 'scheduled') {
-                $rem = $script:ScheduledAt - (Get-Date)
+                $rem = $script:ScheduledAt - [DateTime]::UtcNow
                 if ($rem.TotalSeconds -le 0) { Start-Run }
-                else { $txtOverall.Text = 'Scheduled for ' + $script:ScheduledAt.ToString('HH:mm'); $txtEta.Text = 'Starts in ' + $rem.ToString('hh\:mm\:ss') }
+                else { $txtOverall.Text = 'Scheduled for ' + (Format-LocalStart $script:ScheduledAt -NoZone); $txtEta.Text = 'Starts in ' + (Format-Countdown $rem) }
+            } elseif ($script:RunState -eq 'idle' -and $cmbStart.SelectedIndex -eq 1) {
+                Update-ScheduleUi   # keep "in 5 h 32 min" current
             }
         }
     } catch { Write-Log "UI error: $($_.Exception.Message)" }
@@ -2844,14 +2894,19 @@ $btnStart.Add_Click({
     if ($script:RunState -eq 'scheduled') { Start-Run; return }
     if ($script:RunState -ne 'idle') { return }
     if ($script:Items.Count -eq 0) { Show-Warning 'Add some clips first.'; return }
-    $when = [string]$cmbStart.SelectedItem.Content
-    if ($when -eq 'Now') { Start-Run; return }
-    if (-not (Get-RunOptions)) { return }   # validate now rather than at 4 am
-    $script:ScheduledAt = Get-NextStart $when
+    if ($cmbStart.SelectedIndex -ne 1) { Start-Run; return }
+    $tod = ConvertTo-TimeOfDay $txtStartTime.Text
+    if ($null -eq $tod) { Show-Warning 'Enter a start time, for example 04:30 or 4:30 pm.'; return }
+    if (-not (Get-RunOptions)) { return }   # validate now rather than at the scheduled time
+    $script:ScheduledAt = Get-NextStartUtc $tod
+    Save-Settings
     Set-RunState 'scheduled'
-    $txtOverall.Text = 'Scheduled for ' + $script:ScheduledAt.ToString('HH:mm')
-    Write-Log ("Queued to start at {0}." -f $script:ScheduledAt.ToString('ddd HH:mm'))
+    $txtOverall.Text = 'Scheduled for ' + (Format-LocalStart $script:ScheduledAt -NoZone)
+    $txtEta.Text = 'Starts in ' + (Format-Countdown ($script:ScheduledAt - [DateTime]::UtcNow))
+    Write-Log ("Queued to start at {0}." -f (Format-LocalStart $script:ScheduledAt))
 })
+$cmbStart.Add_SelectionChanged({ Update-ScheduleUi })
+$txtStartTime.Add_TextChanged({ Update-ScheduleUi })
 $btnCancel.Add_Click({
     if ($script:RunState -eq 'scheduled') {
         Set-RunState 'idle'
