@@ -95,15 +95,19 @@ public enum ProcessRunner {
     /// Run and deliver stderr line by line (ffmpeg ends progress lines with `\r`, so both `\r` and
     /// `\n` end a line, as .NET's ReadLine does). `niceness` lowers the child's CPU priority.
     /// Returns the exit status; a killed process returns the signal number.
-    public static func streamStderr(_ executable: String, _ arguments: [String], niceness: Int32 = 0,
+    /// `mergeStdout` sends stdout to the same stream (for scripts whose whole output is shown).
+    /// `environment` adds to (or overrides) the child's environment.
+    public static func streamStderr(_ executable: String, _ arguments: [String], niceness: Int32 = 0, mergeStdout: Bool = false,
+                                    environment: [String: String] = [:],
                                     onLine: @escaping @Sendable (String) -> Void) async throws -> Int32 {
         let handle = ProcessHandle()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Int32, Error>) in
                 DispatchQueue.global(qos: .userInitiated).async {
                     let p = makeProcess(executable, arguments)
+                    if !environment.isEmpty { p.environment = (p.environment ?? [:]).merging(environment) { $1 } }
                     let err = Pipe()
-                    p.standardOutput = FileHandle.nullDevice
+                    p.standardOutput = mergeStdout ? err : FileHandle.nullDevice
                     p.standardError = err
                     do { try p.run() } catch {
                         cont.resume(throwing: ProcessError("Could not start \(executable): \(error.localizedDescription)"))

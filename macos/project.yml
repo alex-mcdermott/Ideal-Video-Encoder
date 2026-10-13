@@ -33,6 +33,40 @@ targets:
       - path: Sources/ive-cli
     dependencies:
       - target: IVECore
+  IdealVideoEncoder:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/App
+      - path: install-prerequisites.sh
+        buildPhase: resources
+    dependencies:
+      - target: IVECore
+    info:
+      path: Sources/App/Info.plist
+      properties:
+        CFBundleName: Ideal Video Encoder
+        CFBundleDisplayName: Ideal Video Encoder
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSApplicationCategoryType: public.app-category.video
+        LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
+        NSHumanReadableCopyright: "Ideal Video Encoder. Free software under the GNU GPL v3 or later."
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: Video clip
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Alternate
+            LSItemContentTypes: [com.apple.quicktime-movie, public.mpeg-4]
+          - CFBundleTypeName: Folder of clips
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Alternate
+            LSItemContentTypes: [public.folder]
+    settings:
+      base:
+        PRODUCT_NAME: Ideal Video Encoder
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.alexmcdermott.idealvideoencoder
+        ENABLE_APP_SANDBOX: NO
+        GENERATE_INFOPLIST_FILE: NO
   IVECoreTests:
     type: bundle.unit-test
     platform: macOS
@@ -44,6 +78,12 @@ targets:
       base:
         GENERATE_INFOPLIST_FILE: YES
 schemes:
+  IdealVideoEncoder:
+    build:
+      targets:
+        IdealVideoEncoder: all
+    run:
+      config: Debug
   IVECore:
     build:
       targets:

@@ -32,7 +32,9 @@ public enum ToolLocator {
         if let o = override?.trimmingCharacters(in: .whitespaces), !o.isEmpty {
             return fm.isExecutableFile(atPath: o) ? o : nil
         }
-        let dirs = searchDirectories + (path ?? "").split(separator: ":").map(String.init)
+        // IVE_SEARCH_PATH replaces the search folders (tests hide the real tools with it, as for the installer script)
+        let dirs = ProcessInfo.processInfo.environment["IVE_SEARCH_PATH"].map { $0.split(separator: ":").map(String.init) }
+            ?? (searchDirectories + (path ?? "").split(separator: ":").map(String.init))
         for d in dirs where !d.isEmpty {
             let candidate = (d as NSString).appendingPathComponent(tool.rawValue)
             if fm.isExecutableFile(atPath: candidate) { return candidate }
