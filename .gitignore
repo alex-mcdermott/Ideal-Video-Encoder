@@ -1,0 +1,9 @@
+# Build output (publish the exe as a GitHub Release asset instead of committing it)
+dist/
+*.exe
+
+# Local test media and logs
+*.mov
+*.MOV
+*.mp4
+*.csv
