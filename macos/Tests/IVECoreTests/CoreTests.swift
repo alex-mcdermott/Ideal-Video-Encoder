@@ -112,6 +112,7 @@ import Testing
         s.codec = .av1; s.crfHevc = "19"; s.crfAv1 = "30"; s.autoCrf = true; s.grainLevel = .strong; s.autoGrain = true
         s.vbrEnabled = false; s.maxRate = "60"; s.lutPath = lut.path; s.lutEnabled = true; s.outputMode = .custom
         s.outputFolder = "/Volumes/Out"; s.subfolder = ""; s.csvEnabled = true; s.csvPath = "/tmp/log.csv"; s.ffmpegPath = "/opt/x/ffmpeg"
+        s.qualityTarget = 97; s.scheduleTime = "4:30 pm"
         let store = SettingsStore(url: tempURL())
         try store.save(s)
         #expect(try store.load() == s)
@@ -119,7 +120,10 @@ import Testing
         // Same keys and value types as Save-Settings
         let obj = try JSONSerialization.jsonObject(with: Data(contentsOf: store.url)) as! [String: Any]
         #expect(Set(obj.keys) == ["Codec", "CrfHevc", "CrfAv1", "AutoCrf", "GrainLevel", "AutoGrain", "VbrEnabled", "MaxRate", "LutPath",
-                                  "LutEnabled", "OutputMode", "OutputFolder", "Subfolder", "CsvEnabled", "CsvPath", "FfmpegPath"])
+                                  "LutEnabled", "OutputMode", "OutputFolder", "Subfolder", "CsvEnabled", "CsvPath", "FfmpegPath",
+                                  "QualityTarget", "ScheduleTime"])
+        #expect(obj["QualityTarget"] as? Int == 97)
+        #expect(obj["ScheduleTime"] as? String == "4:30 pm")
         #expect(obj["CrfHevc"] as? String == "19")
         #expect(obj["MaxRate"] as? String == "60")
         #expect(obj["GrainLevel"] as? Int == 2)
@@ -145,7 +149,9 @@ import Testing
                 "OutputFolder":  "D:\\\\Exports",
                 "Subfolder":  "",
                 "CsvEnabled":  true,
-                "CsvPath":  "C:\\\\Users\\\\me\\\\Desktop\\\\ffmpeg_log.csv"
+                "CsvPath":  "C:\\\\Users\\\\me\\\\Desktop\\\\ffmpeg_log.csv",
+                "QualityTarget":  93,
+                "ScheduleTime":  "19:15"
             }
             """
         let url = tempURL()
@@ -154,6 +160,7 @@ import Testing
         let s = try SettingsStore(url: url).load()
         #expect(s.codec == .av1 && s.crfHevc == "20" && s.crfAv1 == "27" && s.grainLevel == .light && s.autoGrain)
         #expect(s.maxRate == "60" && s.outputMode == .custom && s.subfolder == "" && s.csvEnabled)
+        #expect(s.qualityTarget == 93 && s.scheduleTime == "19:15")
         // LUT that doesn't exist here is dropped, and Apply LUT stays off
         #expect(s.lutPath == "" && !s.lutEnabled)
     }
@@ -168,6 +175,7 @@ import Testing
         #expect(s.grainLevel == .off)       // out of range ignored
         #expect(!s.vbrEnabled)              // missing flag reads as false, as [bool]$null does
         #expect(s.subfolder == "Out")
+        #expect(s.qualityTarget == 0 && s.scheduleTime == "04:00")   // v1.0 files: defaults
     }
 }
 
@@ -343,13 +351,48 @@ import Testing
 }
 
 @Suite struct ScheduleTests {
+    var london: Calendar { var c = Calendar(identifier: .gregorian); c.timeZone = TimeZone(identifier: "Europe/London")!; return c }
+    func date(_ y: Int, _ mo: Int, _ d: Int, _ h: Int, _ mi: Int = 0, _ cal: Calendar) -> Date {
+        cal.date(from: DateComponents(year: y, month: mo, day: d, hour: h, minute: mi))!
+    }
 
-    @Test func schedule() {
-        var cal = Calendar(identifier: .gregorian); cal.timeZone = TimeZone(identifier: "Europe/London")!
-        let now = cal.date(from: DateComponents(year: 2026, month: 3, day: 1, hour: 14, minute: 30))!
-        #expect(StartSchedule.now.nextStart(after: now, calendar: cal) == now)
-        #expect(StartSchedule.sevenPM.nextStart(after: now, calendar: cal) == cal.date(from: DateComponents(year: 2026, month: 3, day: 1, hour: 19))!)
-        #expect(StartSchedule.onePM.nextStart(after: now, calendar: cal) == cal.date(from: DateComponents(year: 2026, month: 3, day: 2, hour: 13))!)
-        #expect(StartSchedule.fourAM.nextStart(after: now, calendar: cal) == cal.date(from: DateComponents(year: 2026, month: 3, day: 2, hour: 4))!)
+    @Test(arguments: [("04:30", 4, 30), ("4:30", 4, 30), ("4.30", 4, 30), ("0430", 4, 30), ("430", 4, 30), ("16:45", 16, 45),
+                      ("4:30 pm", 16, 30), ("4pm", 16, 0), ("4 PM", 16, 0), ("12am", 0, 0), ("12pm", 12, 0), ("12:15a", 0, 15), (" 7 ", 7, 0), ("0", 0, 0)])
+    func parses(text: String, h: Int, m: Int) { #expect(Schedule.parse(text) == .init(hour: h, minute: m)) }
+
+    @Test(arguments: ["", "24:00", "13pm", "0am", "4:60", "four", "4:3", "12345", "4:30:00", "-1"])
+    func rejects(text: String) { #expect(Schedule.parse(text) == nil) }
+
+    @Test func nextOccurrence() {
+        let c = london
+        let now = date(2026, 3, 1, 14, 30, c)
+        #expect(Schedule.nextStart(.init(hour: 19, minute: 0), after: now, calendar: c) == date(2026, 3, 1, 19, 0, c))
+        #expect(Schedule.nextStart(.init(hour: 4, minute: 0), after: now, calendar: c) == date(2026, 3, 2, 4, 0, c))
+        #expect(Schedule.nextStart(.init(hour: 14, minute: 30), after: now, calendar: c) == date(2026, 3, 2, 14, 30, c))
+    }
+
+    @Test func daylightSaving() {
+        let c = london
+        let utc = TimeZone(identifier: "UTC")!
+        // Spring forward (29 Mar 2026, 01:00 GMT -> 02:00 BST): 01:30 doesn't exist, start just after the gap at 02:30 BST
+        let spring = Schedule.nextStart(.init(hour: 1, minute: 30), after: date(2026, 3, 28, 22, 0, c), calendar: c)
+        #expect(spring == Date(timeIntervalSince1970: 1_774_747_800))   // 2026-03-29 01:30 UTC = 02:30 BST
+        // Fall back (25 Oct 2026, 02:00 BST -> 01:00 GMT): 01:30 happens twice; use the second (GMT) one
+        let fall = Schedule.nextStart(.init(hour: 1, minute: 30), after: date(2026, 10, 24, 22, 0, c), calendar: c)
+        var u = Calendar(identifier: .gregorian); u.timeZone = utc
+        #expect(u.dateComponents([.day, .hour, .minute], from: fall) == DateComponents(day: 25, hour: 1, minute: 30))
+        // Countdown across the change is real elapsed time: 22:00 BST to 04:00 GMT is 7 hours
+        let at = Schedule.nextStart(.init(hour: 4, minute: 0), after: date(2026, 10, 24, 22, 0, c), calendar: c)
+        #expect(Schedule.countdown(at.timeIntervalSince(date(2026, 10, 24, 22, 0, c))) == "7:00:00")
+    }
+
+    @Test func hintText() {
+        let c = london
+        let now = date(2026, 7, 6, 23, 0, c)
+        let h = Schedule.hint(for: "4:30", now: now, calendar: c, locale: Locale(identifier: "en_GB"))
+        #expect(h == "Starts Tue 04:30 British Summer Time, in 5 h 30 min")
+        #expect(Schedule.hint(for: "23:30", now: now, calendar: c, locale: Locale(identifier: "en_GB")).hasSuffix("in 30 min"))
+        #expect(Schedule.hint(for: "nonsense", now: now, calendar: c) == "Enter a time, e.g. 04:30 or 4:30 pm.")
+        #expect(Schedule.countdown(3725) == "1:02:05" && Schedule.countdown(90000) == "25:00:00")
     }
 }

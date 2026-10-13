@@ -16,6 +16,10 @@ public enum WorkerEvent: Sendable, Equatable {
     case item(path: String, status: String, state: ItemState, progress: Double?, detail: String?)
     case overall(percent: Double, text: String, eta: String)
     case finished(ok: Int, failed: Int, cancelled: Bool, elapsed: TimeInterval)
+    /// Analysis: the overall suggestion (most demanding clip's CRF, largest cap), if any clip finished.
+    case analysisFinished(cancelled: Bool, suggestion: AnalysisSuggestion?, elapsed: TimeInterval)
+    /// A clip's analysis ('aresult', remember false) or quality-target measurement to keep on the clip ('override', remember true).
+    case clipResult(path: String, result: ClipOverride, remember: Bool)
 }
 
 public typealias WorkerSink = @Sendable (WorkerEvent) -> Void
@@ -47,6 +51,8 @@ public struct EncodeWorker: Sendable {
         let t0 = Date()
         var index = 0, ok = 0, failed = 0
         var namer = OutputNamer()
+        var qTmp: URL?
+        defer { if let qTmp { try? FileManager.default.removeItem(at: qTmp) } }
         func log(_ s: String) { emit(.log(s)) }
         @Sendable func setClip(_ path: String, _ status: String, _ state: ItemState, _ progress: Double?, _ detail: String?) {
             emit(.item(path: path, status: status, state: state, progress: progress, detail: detail))
@@ -88,24 +94,75 @@ public struct EncodeWorker: Sendable {
                     throw ProcessError("this clip is full range and needs ffmpeg's zscale filter, which the installed ffmpeg lacks (see Tools in Settings)")
                 }
 
+                // CRF/cap/grain for this clip, in priority order:
+                //   1. Quality target: a per-clip analysis for the same target and settings, otherwise measure now
+                //   2. A per-clip analysis applied from the Analysis tab ("Use per clip") for the same settings
+                //   3. The global CRF (manual or Auto) and cap
+                var q: ClipOverride?
+                var qSource = ""
+                var ov = opt.overrides[file]
+                if let o = ov, o.key != opt.lookKey {
+                    log("\(name): its analysis was made with different codec/look/grain settings, so it isn't used.")
+                    ov = nil
+                }
+                if opt.qualityTarget > 0 {
+                    let target = Double(opt.qualityTarget)
+                    if let o = ov, o.target == target {
+                        q = o; qSource = "analysed, VMAF \(opt.qualityTarget)"
+                        log("\(name): reusing its analysis for VMAF \(opt.qualityTarget): CRF \(o.crf), cap \(o.cap) Mbps.")
+                    } else {
+                        if qTmp == nil {
+                            let d = FileManager.default.temporaryDirectory.appendingPathComponent("IdealVE-target-" + UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(8).lowercased())
+                            try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+                            qTmp = d
+                        }
+                        var aw = AnalysisWorker(tools: tools)
+                        aw.niceness = niceness
+                        let r = try await aw.findQualityCrf(path: file, options: opt, target: target, id: index, tmp: qTmp!,
+                            onTest: { label, pct in
+                                setClip(file, "Measuring (\(label))", .active, pct, "Finding the CRF for VMAF \(opt.qualityTarget)")
+                                overall(0)
+                            },
+                            onPoint: { p, label in log("\(name): \(label) \(arrow) \(Fmt.fixed(p.avg, 1)) Mbps, VMAF \(Fmt.fixed(p.vmaf, 2))") })
+                        let o = ClipOverride(crf: r.crf, cap: r.cap, grain: r.grain, target: target, key: opt.lookKey,
+                                             codecName: opt.codec.displayName, met: r.met, vmaf: r.best.vmaf)
+                        q = o; qSource = "VMAF \(opt.qualityTarget)"
+                        log("\(name): VMAF \(opt.qualityTarget) target \(arrow) CRF \(r.crf), cap \(r.cap) Mbps (sample VMAF \(Fmt.fixed(r.best.vmaf, 1)))\(r.met ? "" : "; target not reached, using the best tested")")
+                        // Remember it on the clip, so re-running with the same settings skips the measurement
+                        emit(.clipResult(path: file, result: o, remember: true))
+                    }
+                } else if let o = ov {
+                    q = o; qSource = "analysed"
+                    log("\(name): using its analysis: CRF \(o.crf), cap \(o.cap) Mbps.")
+                }
+
                 var signals = ClipSignals()
-                if opt.autoCrf || opt.autoGrain {
+                if q == nil && (opt.autoCrf || opt.autoGrain) {
                     signals = (try? await ClipAnalysis.run(ffmpeg: tools.ffmpeg, path: file)) ?? signals
                     if Task.isCancelled { setClip(file, "Cancelled", .cancelled, 0, nil); break }
                     func r1(_ v: Double?) -> String { v.map { Fmt.num(Fmt.round($0, 1)) } ?? "n/a" }
                     log("\(name): analysis Motion(YDIF)=\(r1(signals.motion)) Colour(SATAVG)=\(r1(signals.colour)) Bright=\(signals.brightMin.map(String.init) ?? "n/a")-\(signals.brightMax.map(String.init) ?? "n/a") NoisePSNR=\(signals.noisePSNR.flatMap { $0 != 0 ? r1($0) : nil } ?? "n/a") dB")
                 }
 
-                let grain = AutoRules.grain(manual: opt.grain, auto: opt.autoGrain, isFLog2: isFLog2, iso: iso, psnr: signals.noisePSNR)
-                let crf = AutoRules.crf(manual: opt.crf, auto: opt.autoCrf, codec: opt.codec, isFLog2: isFLog2, iso: iso, signals: signals)
+                let grain: Grain, crf: Int, capUse: Double
+                if let q {
+                    // The measured CRF only holds for the grain level it was measured with
+                    crf = q.crf; grain = q.grain
+                    capUse = opt.vbrEnabled ? Double(q.cap) : 0
+                } else {
+                    grain = AutoRules.grain(manual: opt.grain, auto: opt.autoGrain, isFLog2: isFLog2, iso: iso, psnr: signals.noisePSNR)
+                    crf = AutoRules.crf(manual: opt.crf, auto: opt.autoCrf, codec: opt.codec, isFLog2: isFLog2, iso: iso, signals: signals)
+                    capUse = opt.vbrEnabled ? opt.maxRate : 0
+                }
 
-                let crfText = opt.autoCrf ? "\(crf) (auto)" : "\(crf)"
+                let crfText = q != nil ? "\(crf) (\(qSource))" : opt.autoCrf ? "\(crf) (auto)" : "\(crf)"
                 let grainText = grain.name + (opt.autoGrain ? " (auto)" : "")
+                let vbvText = capUse > 0 ? Fmt.num(capUse) + "M" : "off"
                 var detailBase = "\(opt.codec.displayName) CRF \(crfText) \(dot) Grain \(grainText)"
-                if opt.vbrEnabled { detailBase += " \(dot) cap \(Fmt.num(opt.maxRate)) Mbps" }
+                if capUse > 0 { detailBase += " \(dot) cap \(Fmt.num(capUse)) Mbps" }
                 if opt.exposure != 0 { detailBase += " \(dot) \(opt.exposureText) EV" }
 
-                let cmd = EncodeCommand(source: file, output: out, codec: opt.codec, crf: crf, grain: grain, cap: opt.cap,
+                let cmd = EncodeCommand(source: file, output: out, codec: opt.codec, crf: crf, grain: grain, cap: capUse,
                                         exposure: opt.exposure, lutPath: opt.lutPath, isFullRange: isFull,
                                         width: info.width, height: info.height, trimStart: opt.trimStart, trimEnd: opt.trimEnd)
                 if !cmd.filters.isEmpty { log("\(name): filters \(cmd.filters.joined(separator: ","))") }   // the script's chain; BT.709 tagging is appended
@@ -169,8 +226,8 @@ public struct EncodeWorker: Sendable {
                 let origMB = origSize / mb, newMB = newSize / mb
                 let ratio = origMB > 0 ? Fmt.round((1 - newMB / origMB) * 100, 1) : 0
                 let notes = CsvLog.notes(codec: opt.codec, iso: iso, isFLog2: isFLog2, isFullRange: isFull,
-                                         exposureText: opt.exposureText, vbvText: opt.vbvText)
-                log("\(name) -> \(out) | saved \(Fmt.num(ratio))% (\(Fmt.num(Fmt.round(origMB, 1))) -> \(Fmt.num(Fmt.round(newMB, 1))) MB) | CRF=\(crf) Grain=\(grain.rawValue) VBV=\(opt.vbvText) EV=\(opt.exposureText) | Heat \(heat)")
+                                         exposureText: opt.exposureText, vbvText: vbvText)
+                log("\(name) -> \(out) | saved \(Fmt.num(ratio))% (\(Fmt.num(Fmt.round(origMB, 1))) -> \(Fmt.num(Fmt.round(newMB, 1))) MB) | CRF=\(crf) Grain=\(grain.rawValue) VBV=\(vbvText) EV=\(opt.exposureText) | Heat \(heat)")
                 if opt.csvEnabled {
                     let row = CsvLog.row(name: name, iso: iso, isFLog2: isFLog2, crf: crf, grain: grain, origBitrate: info.streamBitRate,
                                          origSizeMB: origMB, newSizeMB: newMB, ratio: ratio, heat: heat, notes: notes)
@@ -181,7 +238,8 @@ public struct EncodeWorker: Sendable {
                 setClip(file, "Done \(ratio >= 0 ? "-" : "+")\(Fmt.num(abs(ratio)))%", .done, 100, "\(sizeText) \(dot) \(detailBase)")
                 ok += 1
             } catch {
-                _ = outPath
+                if let o = outPath, Task.isCancelled { try? FileManager.default.removeItem(atPath: o) }
+                if Task.isCancelled || error is CancellationError { setClip(file, "Cancelled", .cancelled, 0, nil); log("\(name): cancelled."); break }
                 setClip(file, "Failed", .error, 0, nil)
                 log("\(name): FAILED - \((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)")
                 failed += 1
@@ -215,19 +273,5 @@ public struct ProgressParser: Sendable {
             speed = line[sr].dropFirst(6).trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "x", with: "")
         }
         return Progress(seconds: cur, percent: min(100, cur / target * 100), speed: speed)
-    }
-}
-
-/// Scheduled start: "Now", or the next 4 am / 1 pm / 7 pm.
-public enum StartSchedule: String, CaseIterable, Sendable, Identifiable {
-    case now = "Now", fourAM = "4 am", onePM = "1 pm", sevenPM = "7 pm"
-    public var id: String { rawValue }
-    var hour: Int? { switch self { case .now: nil; case .fourAM: 4; case .onePM: 13; case .sevenPM: 19 } }
-
-    /// `Get-NextStart`: today at that hour, or tomorrow if it has passed.
-    public func nextStart(after now: Date = Date(), calendar: Calendar = .current) -> Date {
-        guard let h = hour else { return now }
-        let today = calendar.date(bySettingHour: h, minute: 0, second: 0, of: calendar.startOfDay(for: now))!
-        return today <= now ? calendar.date(byAdding: .day, value: 1, to: today)! : today
     }
 }

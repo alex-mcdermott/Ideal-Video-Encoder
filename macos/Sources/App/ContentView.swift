@@ -130,8 +130,8 @@ struct RunBar: View {
             ProgressView(value: model.overallPercent, total: 100)
                 .accessibilityLabel("Overall progress")
             HStack(spacing: 10) {
-                Picker("Start", selection: $model.schedule) {
-                    ForEach(StartSchedule.allCases) { Text($0.rawValue).tag($0) }
+                Picker("Start", selection: $model.startWhen) {
+                    ForEach(StartWhen.allCases) { Text($0.rawValue).tag($0) }
                 }
                 .labelsHidden()
                 .fixedSize()
@@ -152,6 +152,22 @@ struct RunBar: View {
                     .controlSize(.large)
                     .disabled(model.runState == .idle || model.cancelling)
                     .help("Cancel the scheduled start, conversion or analysis (⌘.)")
+            }
+            if model.startWhen == .later {
+                HStack(spacing: 10) {
+                    TextField("Start time", text: $model.settings.scheduleTime, prompt: Text("e.g. 04:30"))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 104)
+                        .multilineTextAlignment(.center)
+                        .disabled(model.runState != .idle)
+                        .help("Any time: 04:30, 4:30 pm, 0430, 4pm")
+                        .accessibilityLabel("Start time")
+                    Text(model.scheduleHint).font(.callout).foregroundStyle(.secondary)
+                        .accessibilityLabel("Schedule")
+                        .accessibilityValue(model.scheduleHint)
+                    Spacer()
+                }
+                .onAppear { model.scheduleHint = Schedule.hint(for: model.settings.scheduleTime) }
             }
         }
         .padding(.horizontal, 16)

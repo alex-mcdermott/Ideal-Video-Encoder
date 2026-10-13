@@ -83,6 +83,7 @@ case "encode":
     if let v = f["csv"] { s.csvEnabled = true; s.csvPath = v }
     if f["auto-crf"] != nil { s.autoCrf = true }
     if f["auto-grain"] != nil { s.autoGrain = true }
+    if let t = f["target"].flatMap(Int.init) { s.qualityTarget = t }
     let report = await ToolReport.check(settings: s)
     guard let tools = report.toolPaths else { fail("missing tools: \(report.missingTools.map(\.rawValue))") }
     let opt: RunOptions
@@ -100,6 +101,9 @@ case "encode":
             case .overall: break
             case .finished(let ok, let failed, let cancelled, let elapsed):
                 print("[end] ok=\(ok) failed=\(failed) cancelled=\(cancelled) elapsed=\(Fmt.clock(elapsed))")
+            case .analysisFinished: break
+            case .clipResult(let p, let r, let remember):
+                print("[result] \((p as NSString).lastPathComponent): CRF \(r.crf) cap \(r.cap) grain \(r.grain.rawValue) target \(Fmt.num(r.target)) met \(r.met) remember=\(remember)")
             }
         }
     }
@@ -108,6 +112,61 @@ case "encode":
     sigint.setEventHandler { print("[cli] cancelling"); task.cancel() }
     sigint.resume()
     await task.value
+
+case "analyse":
+    // ive-cli analyse <files...> [--codec hevc|av1] [--target 93|95|97] [--crf N] [--cap MBPS|off] [--ev X] [--lut FILE] [--auto-crf]
+    let (files, f) = options(argv.dropFirst(2))
+    guard !files.isEmpty else { fail(usage) }
+    var s = settings
+    if let c = f["codec"].flatMap(Codec.init(rawValue:)) { s.codec = c }
+    if let v = f["crf"] { s.setCrf(v, for: s.codec) }
+    if let v = f["cap"] { if v == "off" { s.vbrEnabled = false } else { s.vbrEnabled = true; s.maxRate = v } }
+    if let v = f["lut"] { s.lutPath = v; s.lutEnabled = !v.isEmpty }
+    if f["auto-crf"] != nil { s.autoCrf = true }
+    let report = await ToolReport.check(settings: s)
+    guard let tools = report.toolPaths, report.hasVmaf else { fail("needs ffmpeg with libvmaf, ffprobe and exiftool") }
+    var opt: RunOptions
+    do { opt = try RunOptions.validate(settings: s, exposure: Double(f["ev"] ?? "0") ?? 0, trimStart: "", trimEnd: "", forAnalysis: true) }
+    catch { fail(error.localizedDescription) }
+    opt.targetVmaf = Double(f["target"] ?? "95") ?? 95
+    let worker = AnalysisWorker(tools: tools)
+    let task = Task {
+        await worker.run(jobs: files, options: opt) { e in
+            switch e {
+            case .log(let t): print("[log] \(t)")
+            case .item(let p, let st, let state, _, let d):
+                if state != .active || st == "Preparing" { print("[item] \((p as NSString).lastPathComponent): \(st) (\(state.rawValue))\n\(d ?? "")") }
+            case .analysisFinished(let c, let sug, let el):
+                print("[end] cancelled=\(c) suggestion=\(sug.map { "CRF \($0.crf) cap \($0.cap)" } ?? "none") elapsed=\(Fmt.clock(el))")
+            default: break
+            }
+        }
+    }
+    signal(SIGINT, SIG_IGN)
+    let sigint = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+    sigint.setEventHandler { print("[cli] cancelling"); task.cancel() }
+    sigint.resume()
+    _ = await task.value
+
+case "measure":
+    // One Measure-Point: ive-cli measure <file> --crf N [--codec] [--cap N]
+    let (pos, f) = options(argv.dropFirst(2))
+    guard let file = pos.first else { fail(usage) }
+    let report = await ToolReport.check(settings: settings)
+    guard let tools = report.toolPaths else { fail("missing tools") }
+    var opt = RunOptions()
+    opt.codec = Codec(rawValue: f["codec"] ?? "hevc") ?? .hevc
+    let w = AnalysisWorker(tools: tools)
+    do {
+        let (clip, _) = try await w.prepare(path: file, id: 0, options: opt)
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("ive-measure-\(UUID().uuidString.prefix(6))")
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        for crf in (f["crf"] ?? "14").split(separator: ",").compactMap({ Int($0) }) {
+            let p = try await w.measure(clip, codec: opt.codec, crf: crf, cap: Int(f["cap"] ?? "0") ?? 0, tmp: tmp)
+            print(String(format: "CRF %d cap %d: avg %.2f Mbps, peak %.2f Mbps, VMAF %.3f, worst 1%% %.2f", p.crf, p.cap, p.avg, p.peak, p.vmaf, p.low))
+        }
+    } catch { fail(error.localizedDescription) }
 
 case "previewcheck":
     // Preview pipeline vs ffmpeg for one frame: ive-cli previewcheck <file> [--frame N] [--ev X] [--lut FILE]

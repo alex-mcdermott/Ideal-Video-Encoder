@@ -16,6 +16,10 @@ public struct AppSettings: Equatable, Sendable {
     public var crfAv1 = String(CodecArgs.av1Crf(fromHevc: 21))
     public var autoGrain = false
     public var grainLevel: Grain = .off
+    /// 0 = off, else VMAF 93/95/97 (v1.1)
+    public var qualityTarget = 0
+    /// "Later at" time as typed (v1.2); whether a start is scheduled isn't saved
+    public var scheduleTime = "04:00"
     public var vbrEnabled = true
     public var maxRate = "35"
     public var outputMode: OutputMode = .source
@@ -45,7 +49,7 @@ public struct AppSettings: Equatable, Sendable {
 extension AppSettings: Codable {
     enum CodingKeys: String, CodingKey {
         case lutPath = "LutPath", lutEnabled = "LutEnabled", codec = "Codec", autoCrf = "AutoCrf", crfHevc = "CrfHevc",
-             crfAv1 = "CrfAv1", autoGrain = "AutoGrain", grainLevel = "GrainLevel", vbrEnabled = "VbrEnabled",
+             crfAv1 = "CrfAv1", autoGrain = "AutoGrain", grainLevel = "GrainLevel", qualityTarget = "QualityTarget", scheduleTime = "ScheduleTime", vbrEnabled = "VbrEnabled",
              maxRate = "MaxRate", outputMode = "OutputMode", outputFolder = "OutputFolder", subfolder = "Subfolder",
              csvEnabled = "CsvEnabled", csvPath = "CsvPath", legacyCrf = "Crf",
              ffmpegPath = "FfmpegPath", ffprobePath = "FfprobePath", exiftoolPath = "ExiftoolPath"
@@ -79,6 +83,8 @@ extension AppSettings: Codable {
         if str(.codec) == "av1" { codec = .av1 }
         autoGrain = flag(.autoGrain)
         if let g = str(.grainLevel).flatMap(Int.init), let grain = Grain(rawValue: g) { grainLevel = grain }
+        if let t = str(.qualityTarget).flatMap(Int.init), [93, 95, 97].contains(t) { qualityTarget = t }
+        if let t = str(.scheduleTime), !t.isEmpty { scheduleTime = t }
         vbrEnabled = flag(.vbrEnabled)
         if let v = str(.maxRate), !v.isEmpty { maxRate = v }
         if str(.outputMode) == "custom" { outputMode = .custom }
@@ -102,6 +108,8 @@ extension AppSettings: Codable {
         try c.encode(crfAv1, forKey: .crfAv1)
         try c.encode(autoGrain, forKey: .autoGrain)
         try c.encode(grainLevel.rawValue, forKey: .grainLevel)
+        try c.encode(qualityTarget, forKey: .qualityTarget)
+        try c.encode(scheduleTime.trimmingCharacters(in: .whitespaces), forKey: .scheduleTime)
         try c.encode(vbrEnabled, forKey: .vbrEnabled)
         try c.encode(maxRate, forKey: .maxRate)
         try c.encode(outputMode.rawValue, forKey: .outputMode)

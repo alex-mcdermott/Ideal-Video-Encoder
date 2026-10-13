@@ -14,7 +14,7 @@ struct QueueView: View {
         VStack(spacing: 0) {
             List(selection: $model.selection) {
                 ForEach(model.items) { item in
-                    QueueRow(item: item).tag(item.id)
+                    QueueRow(item: item, isSelected: model.selection.contains(item.id)).tag(item.id)
                 }
             }
             .contextMenu(forSelectionType: QueueItem.ID.self) { ids in
@@ -66,12 +66,19 @@ struct QueueView: View {
 
 struct QueueRow: View {
     let item: QueueItem
+    /// On a highlighted row accent-coloured text vanishes, so the note uses the primary style there
+    var isSelected = false
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
             VStack(alignment: .leading, spacing: 3) {
                 Text(item.name).font(.headline).lineLimit(1).truncationMode(.middle)
                 Text(item.detail).font(.callout).foregroundStyle(.secondary).lineLimit(2).truncationMode(.middle)
+                if !item.note.isEmpty {
+                    Text(item.note).font(.callout)
+                        .foregroundStyle(isSelected ? AnyShapeStyle(.primary) : AnyShapeStyle(Color.accentColor))
+                        .lineLimit(1).truncationMode(.tail)
+                }
                 if item.state == .active {
                     ProgressView(value: item.progress, total: 100).controlSize(.small)
                         .accessibilityLabel("Progress for \(item.name)")
@@ -83,7 +90,7 @@ struct QueueRow: View {
         .padding(.vertical, 3)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(item.name), \(item.status)")
-        .accessibilityValue(item.detail)
+        .accessibilityValue(item.note.isEmpty ? item.detail : item.detail + ". " + item.note)
     }
 }
 

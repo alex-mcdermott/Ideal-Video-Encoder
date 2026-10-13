@@ -18,6 +18,8 @@ final class QueueItem: Identifiable {
     var state: ItemState = .queued
     var progress = 0.0
     var detail: String
+    /// Per-clip analysis note (v1.1), shown under the detail line
+    var note = ""
 
     init(path: String, info: String) {
         self.path = path
@@ -54,7 +56,10 @@ final class AppModel {
     var trimStart = ""
     var trimEnd = ""
     var runState: RunState = .idle
-    var schedule: StartSchedule = .now
+    var startWhen: StartWhen = .now
+    var scheduleHint = ""
+    /// Per-clip CRF/cap/grain from "Use per clip" or a quality-target run, by source path
+    var clipOverrides: [String: ClipOverride] = [:] { didSet { updateNotes() } }
     var scheduledAt: Date?
     var overallText = "Ready"
     var etaText = ""
@@ -105,7 +110,18 @@ final class AppModel {
 
     // MARK: settings
 
+    /// `Get-LookKey` for the current settings.
+    var lookKey: String { RunOptions.lookKey(settings: settings, exposure: exposure) }
+
+    /// `Update-OverrideNotes`.
+    func updateNotes() {
+        let key = lookKey
+        for it in items { it.note = clipOverrides[it.path]?.note(currentKey: key) ?? "" }
+    }
+
     private func settingsChanged() {
+        updateNotes()
+        if startWhen == .later { scheduleHint = Schedule.hint(for: settings.scheduleTime) }
         saveTask?.cancel()
         saveTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(400))
@@ -191,6 +207,7 @@ final class AppModel {
         }
         guard !added.isEmpty else { return }
         appendLog("Added \(added.count) clip(s).")
+        updateNotes()
         if selection.isEmpty, let first = items.first { selection = [first.id] }
         // Duration needs ffprobe; fill it in when it arrives
         if let ffprobe = toolReport?.paths[.ffprobe] ?? ToolLocator.locate(.ffprobe, override: settings.ffprobePath) {
@@ -208,6 +225,7 @@ final class AppModel {
 
     func removeSelected() {
         guard !isLocked else { return }
+        for it in items where selection.contains(it.id) { clipOverrides[it.path] = nil }
         items.removeAll { selection.contains($0.id) }
         selection = []
     }
@@ -215,6 +233,7 @@ final class AppModel {
     func clear() {
         guard !isLocked else { return }
         items.removeAll()
+        clipOverrides.removeAll()
         selection = []
         appendLog("Queue cleared.")
     }
@@ -249,24 +268,24 @@ final class AppModel {
         if runState == .scheduled { startRun(); return }
         guard runState == .idle else { return }
         if items.isEmpty { warn("Add some clips first."); return }
-        if schedule == .now { startRun(); return }
-        guard runOptions() != nil else { return }   // validate now rather than at 4 am
-        scheduledAt = schedule.nextStart()
+        if startWhen == .now { startRun(); return }
+        guard let t = Schedule.parse(settings.scheduleTime) else { warn("Enter a start time, for example 04:30 or 4:30 pm."); return }
+        guard runOptions() != nil else { return }   // validate now rather than at the scheduled time
+        scheduledAt = Schedule.nextStart(t)
+        saveSettings()
         runState = .scheduled
         updateScheduleText()
-        let f = DateFormatter(); f.dateFormat = "EEE HH:mm"
-        appendLog("Queued to start at \(f.string(from: scheduledAt!)).")
+        appendLog("Queued to start at \(Schedule.localStart(scheduledAt!)).")
     }
 
     private func updateScheduleText() {
         guard runState == .scheduled, let at = scheduledAt else { return }
-        let f = DateFormatter(); f.dateFormat = "HH:mm"
-        overallText = "Scheduled for \(f.string(from: at))"
-        etaText = "Starts in " + Fmt.clock(max(0, at.timeIntervalSinceNow))
+        overallText = "Scheduled for " + Schedule.localStart(at, zone: false)
+        etaText = "Starts in " + Schedule.countdown(at.timeIntervalSinceNow)
     }
 
     func startRun() {
-        guard workerTask == nil, let opt = runOptions(), let report = toolReport, let tools = report.toolPaths else {
+        guard workerTask == nil, var opt = runOptions(), let report = toolReport, let tools = report.toolPaths else {
             if runState == .scheduled { runState = .idle; overallText = "Ready"; etaText = "" }
             return
         }
@@ -274,6 +293,7 @@ final class AppModel {
         if pending.isEmpty { pending = items }   // everything done -> re-run the lot
         if pending.isEmpty { appendLog("The queue is empty."); runState = .idle; return }
         for it in pending { it.status = "Waiting"; it.state = .waiting; it.progress = 0; it.detail = it.info }
+        for it in pending { if let o = clipOverrides[it.path] { opt.overrides[it.path] = o } }
         saveSettings()
         overallPercent = 0
         etaText = ""
@@ -316,6 +336,9 @@ final class AppModel {
             etaText = "\(summary) \(Fmt.dot) \(Fmt.clock(elapsed))"
             if !cancelled { overallPercent = 100 }
             appendLog("Finished: \(summary).")
+        case .clipResult(let path, let result, let remember):
+            if remember { clipOverrides[path] = result }
+        case .analysisFinished: break
         }
     }
 
@@ -368,6 +391,8 @@ final class AppModel {
                 if let pct = self.cpu.sample() { self.cpuText = "CPU \(Int(pct.rounded()))%" }
                 if self.runState == .scheduled, let at = self.scheduledAt {
                     if at.timeIntervalSinceNow <= 0 { self.startRun() } else { self.updateScheduleText() }
+                } else if self.runState == .idle && self.startWhen == .later {
+                    self.scheduleHint = Schedule.hint(for: self.settings.scheduleTime)   // keep "in 5 h 32 min" current
                 }
             }
         }

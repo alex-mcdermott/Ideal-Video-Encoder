@@ -25,6 +25,12 @@ public struct RunOptions: Sendable, Equatable {
     public var csvPath = ""
     /// Analysis only.
     public var targetVmaf = 95.0
+    /// Encode: 0 = off, else measure each clip for this VMAF (93/95/97) before encoding it.
+    public var qualityTarget = 0
+    /// Everything a measured CRF depends on (`Get-LookKey`); per-clip results are reused only when it matches.
+    public var lookKey = ""
+    /// Per-clip results ("Use per clip" or earlier quality-target runs), by source path.
+    public var overrides: [String: ClipOverride] = [:]
 
     public init() {}
 
@@ -37,6 +43,8 @@ public struct RunOptions: Sendable, Equatable {
     public static func validate(settings s: AppSettings, exposure: Double, trimStart: String, trimEnd: String,
                                 forAnalysis: Bool = false) throws -> RunOptions {
         var o = RunOptions()
+        o.qualityTarget = s.qualityTarget
+        o.lookKey = lookKey(settings: s, exposure: exposure)
         o.autoCrf = s.autoCrf
         o.autoGrain = s.autoGrain
         o.codec = s.codec
@@ -44,14 +52,14 @@ public struct RunOptions: Sendable, Equatable {
         if let c = Int(crfText), c >= 0, c <= s.codec.maxCrf {
             o.crf = c
         } else {
-            if !o.autoCrf { throw ProcessError("CRF must be a whole number from 0 to \(s.codec.maxCrf) for \(s.codec.displayName).") }
+            if !o.autoCrf && o.qualityTarget == 0 { throw ProcessError("CRF must be a whole number from 0 to \(s.codec.maxCrf) for \(s.codec.displayName).") }
             o.crf = s.codec == .av1 ? CodecArgs.av1Crf(fromHevc: 21) : 21
         }
         o.grain = s.grainLevel
 
         o.vbrEnabled = s.vbrEnabled
         let rate = Trim.parseFloat(s.maxRate) ?? 0
-        if o.vbrEnabled && rate <= 0 { throw ProcessError("Max rate must be a positive number of Mbps.") }
+        if o.vbrEnabled && o.qualityTarget == 0 && rate <= 0 { throw ProcessError("Max rate must be a positive number of Mbps.") }
         o.maxRate = rate
 
         o.exposure = Fmt.round(exposure, 1)
@@ -79,6 +87,14 @@ public struct RunOptions: Sendable, Equatable {
         o.csvEnabled = s.csvEnabled
         o.csvPath = s.csvPath
         return o
+    }
+}
+
+extension RunOptions {
+    /// `Get-LookKey`: "codec|EV|LUT path (when applied)|grain index|auto grain".
+    public static func lookKey(settings s: AppSettings, exposure: Double) -> String {
+        let lut = s.lutEnabled && !s.lutPath.isEmpty && FileManager.default.fileExists(atPath: s.lutPath) ? s.lutPath : ""
+        return "\(s.codec.rawValue)|\(Fmt.num(Fmt.round(exposure, 1)))|\(lut)|\(s.grainLevel.rawValue)|\(s.autoGrain ? "True" : "False")"
     }
 }
 

@@ -89,7 +89,7 @@ struct LookSection: View {
                 }
                     .labelsHidden()
                     .accessibilityValue(Fmt.signed1(model.exposure) + " stops")
-                    .onChange(of: model.exposure) { _, _ in model.preview.requestUpdate() }
+                    .onChange(of: model.exposure) { _, _ in model.preview.requestUpdate(); model.updateNotes() }
                 Caption("Stops, applied before the LUT using the F‑Log2 curve.")
             }
         }
@@ -103,14 +103,14 @@ struct EncodingSection: View {
 
     var crfError: String? {
         let s = model.settings
-        if s.autoCrf { return nil }
+        if s.autoCrf || s.qualityTarget > 0 { return nil }
         let t = model.crfText.trimmingCharacters(in: .whitespaces)
         if let c = Int(t), c >= 0, c <= s.codec.maxCrf { return nil }
         return "Whole number from 0 to \(s.codec.maxCrf)."
     }
 
     var rateError: String? {
-        guard model.settings.vbrEnabled else { return nil }
+        guard model.settings.vbrEnabled, model.settings.qualityTarget == 0 else { return nil }
         let t = model.settings.maxRate.trimmingCharacters(in: .whitespaces)
         if let v = Double(t), v > 0, t.range(of: #"^[+]?(\d+\.?\d*|\.\d+)$"#, options: .regularExpression) != nil { return nil }
         return "A positive number of Mbps."
@@ -132,6 +132,17 @@ struct EncodingSection: View {
                           : "")
             }
             VStack(alignment: .leading, spacing: 4) {
+                Picker("Quality target", selection: $model.settings.qualityTarget) {
+                    Text("Off (use CRF)").tag(0)
+                    Text("VMAF 93").tag(93)
+                    Text("VMAF 95").tag(95)
+                    Text("VMAF 97").tag(97)
+                }
+                .help("VMAF 100 = indistinguishable from the source")
+                .accessibilityLabel("Quality target")
+                Caption(model.settings.qualityTarget > 0 ? "Each clip is measured first to pick its CRF and cap. Slower." : "Or measure each clip to hit a VMAF score.")
+            }
+            VStack(alignment: .leading, spacing: 4) {
                 LabeledContent("Quality (CRF)") {
                     HStack(spacing: 12) {
                         TextField("Quality (CRF)", text: Binding(get: { model.crfText }, set: { model.crfText = $0 }))
@@ -139,9 +150,10 @@ struct EncodingSection: View {
                             .frame(width: 52)
                             .multilineTextAlignment(.center)
                             .labelsHidden()
-                            .disabled(model.settings.autoCrf)
+                            .disabled(model.settings.autoCrf || model.settings.qualityTarget > 0)
                         Toggle("Auto", isOn: $model.settings.autoCrf)
                             .toggleStyle(.checkbox)
+                            .disabled(model.settings.qualityTarget > 0)
                             .accessibilityLabel("Automatic CRF")
                     }
                 }
@@ -175,6 +187,8 @@ struct EncodingSection: View {
                         .frame(width: 64)
                         .multilineTextAlignment(.center)
                         .labelsHidden()
+                        .disabled(model.settings.qualityTarget > 0)
+                        .help(model.settings.qualityTarget > 0 ? "With a quality target, each clip's cap comes from its measurement" : "")
                     Text("Mbps max").foregroundStyle(.secondary)
                 }
                 .disabled(!model.settings.vbrEnabled)
@@ -232,6 +246,7 @@ struct OutputSection: View {
                 Text("Custom folder").tag(OutputMode.custom)
             }
             .pickerStyle(.radioGroup)
+            .accessibilityLabel("Save to")
             if model.settings.outputMode == .custom {
                 HStack {
                     TextField("Output folder", text: $model.settings.outputFolder, prompt: Text("Choose a folder"))
