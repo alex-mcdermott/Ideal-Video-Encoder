@@ -26,11 +26,28 @@ It was built around Fujifilm footage (X-H2S 6.2K open gate, X-T5 6.2K/4K, F-Log2
 - [ExifTool](https://exiftool.org/) on your `PATH` as `exiftool.exe`
 - Optional, for the preview: [mpv.net](https://github.com/mpvnet-player/mpv.net) (installed in the default location, or placed in an `mpv.net` folder next to the app)
 
-LUTs are not included. Fujifilm publishes official F-Log/F-Log2 LUTs on its website.
+The installer can set these up for you (see below). LUTs are not included; Fujifilm publishes official F-Log/F-Log2 LUTs on its website.
 
 ## Getting started
 
-**Download** `Ideal-Video-Encoder.exe` from the [Releases](../../releases) page and run it, or run the script directly:
+### Install (recommended)
+
+Download **`Ideal-Video-Encoder-Setup-<version>.exe`** from the [Releases](../../releases) page and run it. It installs the app for your user account (no admin rights needed), adds Start menu shortcuts and an uninstaller, and can install any missing prerequisites:
+
+- **FFmpeg** (full build) and **ExifTool**, required
+- **mpv.net**, optional, for the live preview
+
+Prerequisites already on your `PATH` and complete are left alone. Missing ones are installed per-user with [winget](https://learn.microsoft.com/windows/package-manager/winget/), or downloaded from their official sites (gyan.dev, exiftool.org, mpv.net) if winget isn't available. You can re-run this any time from the Start menu entry **Ideal Video Encoder - Install or repair prerequisites**, or directly:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\installer\Install-Prerequisites.ps1
+```
+
+Uninstalling the app does not remove the prerequisites, since other programs may use them.
+
+### Portable
+
+Alternatively download `Ideal-Video-Encoder.exe` on its own (prerequisites must already be installed), or run the script directly:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\Ideal-Video-Encoder.ps1
@@ -103,6 +120,14 @@ source -> exposure (lutyuv, 10-bit) -> LUT (lut3d, 10-bit RGB) -> full-to-limite
 ```
 
 This installs [ps2exe](https://github.com/MScholtes/PS2EXE) for the current user if needed and writes `dist\Ideal-Video-Encoder.exe` (64-bit, no console window, per-monitor DPI aware).
+
+To also build the installer, install [Inno Setup 6](https://jrsoftware.org/isinfo.php) (`winget install --id JRSoftware.InnoSetup -e --scope user`) and run:
+
+```powershell
+.\installer\build-installer.ps1
+```
+
+This writes `dist\Ideal-Video-Encoder-Setup-<version>.exe`, using the version set in `build.ps1`.
 
 ## Troubleshooting
 
