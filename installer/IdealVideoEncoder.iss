@@ -1,6 +1,6 @@
 ; Ideal Video Encoder - Windows installer (Inno Setup 6)
 ; SPDX-License-Identifier: GPL-3.0-or-later
-; Per-user install (no admin). Optionally installs FFmpeg, ExifTool and mpv.net via Install-Prerequisites.ps1.
+; Per-user install (no admin). Installs FFmpeg, ExifTool and mpv.net if missing, via Install-Prerequisites.ps1.
 ; Build with installer\build-installer.ps1 (passes /DAppVersion=x.y.z).
 
 #define AppName "Ideal Video Encoder"
@@ -38,8 +38,7 @@ MinVersion=10.0.17763
 CloseApplications=yes
 
 [Tasks]
-Name: "prereqs"; Description: "Install FFmpeg and ExifTool if they are missing (required)"; GroupDescription: "Prerequisites (downloaded from their official sources):"
-Name: "mpv"; Description: "Install mpv.net if it is missing (for the live preview)"; GroupDescription: "Prerequisites (downloaded from their official sources):"
+Name: "prereqs"; Description: "Install FFmpeg, ExifTool and mpv.net if they are missing (required)"; GroupDescription: "Prerequisites (downloaded from their official sources):"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
@@ -68,16 +67,13 @@ var
 begin
   LogFile := ExpandConstant('{app}\prerequisites.log');
   Params := '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\Install-Prerequisites.ps1') + '" -LogPath "' + LogFile + '"';
-  if not WizardIsTaskSelected('mpv') then
-    Params := Params + ' -SkipMpv';
-
   WizardForm.StatusLabel.Caption := 'Checking and installing FFmpeg, ExifTool and mpv.net. Downloads can take a few minutes...';
   WizardForm.ProgressGauge.Style := npbstMarquee;
   try
     if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), Params, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
       SuppressibleMsgBox('Some prerequisites could not be installed automatically.' + #13#10#13#10 +
         'Details are in:' + #13#10 + LogFile + #13#10#13#10 +
-        'You can retry later from the Start menu ("' + '{#AppName}' + ' - Install or repair prerequisites"), or install FFmpeg (full build) and ExifTool yourself.',
+        'You can retry later from the Start menu ("' + '{#AppName}' + ' - Install or repair prerequisites"), or install FFmpeg (full build), ExifTool and mpv.net yourself.',
         mbError, MB_OK, IDOK);
   finally
     WizardForm.ProgressGauge.Style := npbstNormal;
@@ -86,6 +82,6 @@ end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
-  if (CurStep = ssPostInstall) and (WizardIsTaskSelected('prereqs') or WizardIsTaskSelected('mpv')) then
+  if (CurStep = ssPostInstall) and WizardIsTaskSelected('prereqs') then
     InstallPrerequisites;
 end;

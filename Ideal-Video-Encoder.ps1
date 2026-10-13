@@ -264,7 +264,7 @@ $CoreScript = {
     # -Preview downscales first so the 6K sources stay real-time; the per-pixel look is unchanged.
     function Get-FilterChain([double]$Exposure, [string]$LutPath, [bool]$IsFull, [switch]$Preview){
         $vf = @()
-        if ($Preview) { $vf += "scale=w=1920:h=1080:force_original_aspect_ratio=decrease" }
+        if ($Preview) { $vf += "scale=w=1920:h=1080:force_original_aspect_ratio=decrease:flags=fast_bilinear" }
         $ev = [math]::Round($Exposure, 2)
         if ($ev -ne 0) { $vf += Get-ExposureFilter $ev }
         # gbrp10le is what ffmpeg picks for the encode anyway; pinning it stops mpv feeding the LUT 8-bit rgb24
@@ -2162,6 +2162,25 @@ function Show-Video([bool]$on) {
     if (-not $on) { $txtNowPlaying.Text = '' }
 }
 
+# Playback tuning shared by the embedded preview and "Open in mpv.net". Software decoding on all cores:
+# 4:2:2 HEVC from recent cameras has no GPU decoder on most PCs, and probing for one stalls playback.
+# Cheap bilinear scaling for 6K, a decode queue, and a large demuxer cache for high-bitrate files.
+$MpvTuning = [ordered]@{
+    'vd-lavc-threads'        = '0'
+    'hwdec'                  = 'no'
+    'vo'                     = 'gpu-next'
+    'gpu-api'                = 'vulkan'      # falls back to d3d11 automatically if Vulkan can't start
+    'vd-queue-enable'        = 'yes'
+    'hr-seek'                = 'no'
+    'scale'                  = 'bilinear'
+    'cscale'                 = 'bilinear'
+    'dscale'                 = 'bilinear'
+    'sws-scaler'             = 'fast-bilinear'
+    'demuxer-max-bytes'      = '2000MiB'
+    'demuxer-max-back-bytes' = '500MiB'
+}
+$script:MpvGpuApi = 'vulkan'
+
 function Initialize-Mpv {
     if ($script:Mpv -and $script:Mpv.IsAlive) { return $true }
     $dll = Join-Path $MpvNetDir 'libmpv-2.dll'
@@ -2173,9 +2192,10 @@ function Initialize-Mpv {
         }
         $bdrVideo.UpdateLayout()
         $m = New-Object IdealVE.Mpv
-        $opts = [ordered]@{
-            'wid' = $videoPanel.Handle.ToInt64().ToString()
-            'hwdec' = 'auto-copy'                 # hardware decode, frames copied back so lavfi filters can run
+        $opts = [ordered]@{ 'wid' = $videoPanel.Handle.ToInt64().ToString() }
+        foreach ($k in $MpvTuning.Keys) { $opts[$k] = $MpvTuning[$k] }
+        $opts['gpu-api'] = $script:MpvGpuApi
+        $more = [ordered]@{
             'loop-file' = 'inf'
             'keep-open' = 'yes'
             'idle' = 'yes'
@@ -2186,7 +2206,10 @@ function Initialize-Mpv {
             'terminal' = 'no'
             'config' = 'no'
         }
-        foreach ($k in $opts.Keys) { [void]$m.SetOption($k, $opts[$k]) }
+        foreach ($k in $more.Keys) { $opts[$k] = $more[$k] }
+        foreach ($k in $opts.Keys) {
+            if ($m.SetOption($k, $opts[$k]) -lt 0) { Write-Log "mpv option $k=$($opts[$k]) isn't supported by this mpv.net version; skipped." }
+        }
         $rc = $m.Initialize()
         if ($rc -lt 0) { $m.Dispose(); throw ("mpv_initialize failed: " + [IdealVE.Mpv]::ErrorString($rc)) }
         [void]$m.RequestLog('error')
@@ -2252,13 +2275,24 @@ function Open-ExternalPreview($item) {
     if (-not (Test-Path -LiteralPath $mpv)) { Write-Log "mpv.net not found at $mpv"; return }
     if (-not $item) { Write-Log 'Add a clip to preview.'; return }
     $vf = Get-FilterChain -Exposure ([math]::Round($sldEv.Value, 1)) -LutPath (Get-CurrentLut) -IsFull (Get-IsFullCached $item.Path) -Preview
-    $mpvArgs = @("--loop-file=inf", "--hwdec=auto-copy", "--title=Preview - $($item.Name)")
+    $mpvArgs = @("--loop-file=inf")
+    foreach ($k in $MpvTuning.Keys) { $mpvArgs += "--$k=$(if ($k -eq 'gpu-api') { $script:MpvGpuApi } else { $MpvTuning[$k] })" }
+    $mpvArgs += "--title=Preview - $($item.Name)"
     if ($vf.Count -gt 0) { $mpvArgs += "--vf=lavfi=[" + ($vf -join ",") + "]" }
     $mpvArgs += $item.Path
     try {
         Start-Process -FilePath $mpv -ArgumentList (($mpvArgs | ForEach-Object { Quote-Arg $_ }) -join ' ')
         Write-Log "Opened $($item.Name) in mpv.net."
     } catch { Write-Log "Failed to launch mpv.net: $($_.Exception.Message)" }
+}
+
+# No usable Vulkan on this PC: switch the preview to Direct3D 11 (once) and restart it
+function Switch-PreviewToD3D11 {
+    $resume = $script:PreviewPath
+    $script:MpvGpuApi = 'd3d11'
+    Write-Log 'Vulkan is not available for the preview; switching to Direct3D 11.'
+    $script:Mpv.Dispose(); $script:Mpv = $null; $script:PreviewPath = $null
+    if ($resume) { Start-Preview }
 }
 
 function Read-MpvEvents {
@@ -2270,6 +2304,15 @@ function Read-MpvEvents {
             $script:Mpv.Dispose(); $script:Mpv = $null; $script:PreviewPath = $null
             Show-Video $false
             Write-Log 'Preview player closed.'
+            return
+        }
+        elseif ($e.Id -eq 2 -and $script:MpvGpuApi -eq 'vulkan' -and $e.Text -match 'Error opening/initializing the selected video_out|Failed initializing any suitable GPU context|Failed (to )?creat\w* (a )?Vulkan|vkCreate\w+ failed') {
+            Switch-PreviewToD3D11
+            return
+        }
+        elseif ($e.Id -eq 7 -and $e.Reason -eq 4 -and $script:MpvGpuApi -eq 'vulkan' -and $script:Mpv.GetProperty('vo-configured') -ne 'yes') {
+            # Playback failed before any video output started: almost always the Vulkan renderer
+            Switch-PreviewToD3D11
             return
         }
         elseif ($e.Id -eq 2) {

@@ -15,5 +15,5 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $exe = Join-Path $OutDir 'Ideal-Video-Encoder.exe'
 Invoke-PS2EXE -InputFile (Join-Path $PSScriptRoot 'Ideal-Video-Encoder.ps1') -OutputFile $exe `
     -noConsole -STA -x64 -DPIAware -supportOS -iconFile (Join-Path $PSScriptRoot 'assets\app.ico') `
-    -title 'Ideal Video Encoder' -product 'Ideal Video Encoder' -copyright 'Alex McDermott, GPL-3.0-or-later' -version '1.0.0'
+    -title 'Ideal Video Encoder' -product 'Ideal Video Encoder' -copyright 'Alex McDermott, GPL-3.0-or-later' -version '1.0.1'
 Get-Item $exe | Select-Object FullName, Length

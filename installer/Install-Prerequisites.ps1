@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Installs what Ideal Video Encoder needs, if it is missing: FFmpeg (full build), ExifTool and mpv.net.
+    Installs what Ideal Video Encoder needs, if it is missing: FFmpeg (full build), ExifTool and mpv.net (all required).
 .DESCRIPTION
     Safe to run repeatedly: tools that are already on PATH and complete are left alone.
     Uses winget (per-user, no admin) when available; otherwise downloads the official builds:
@@ -9,8 +9,6 @@
       mpv.net  - portable build (GitHub: mpvnet-player/mpv.net)
     into %LOCALAPPDATA%\Programs and adds FFmpeg/ExifTool to the user PATH.
     Exit code 0 = everything required is available, 1 = something required is still missing.
-.PARAMETER SkipMpv
-    Don't install mpv.net (only needed for the live preview).
 .PARAMETER CheckOnly
     Report what is present or missing; install nothing.
 .PARAMETER NoWinget
@@ -28,7 +26,6 @@
 #>
 # SPDX-License-Identifier: GPL-3.0-or-later
 param(
-    [switch]$SkipMpv,
     [switch]$CheckOnly,
     [switch]$NoWinget,
     [switch]$Force,
@@ -220,21 +217,21 @@ if ($et -and -not $Force) {
     if ($et) { Say "[ok] ExifTool: $et" 'Green' } else { Say '[problem] ExifTool: still not found' 'Red'; $failed += 'ExifTool' }
 }
 
-# mpv.net (optional: live preview)
-if (-not $SkipMpv) {
+# mpv.net (the app's preview runs on its libmpv)
+$mpv = Find-MpvNet
+if ($mpv -and -not $Force) {
+    Say "[ok] mpv.net: $mpv" 'Green'
+} elseif ($CheckOnly) {
+    Say '[missing] mpv.net: not found' 'Yellow'; $failed += 'mpv.net'
+} else {
+    Say 'Installing mpv.net...'
+    try {
+        if ($useWinget -and -not $Force) { [void](Invoke-Winget 'mpv.net') }
+        # winget can install it somewhere the app doesn't look; the portable build goes where it does
+        if (-not (Find-MpvNet) -or $Force) { Install-MpvDirect }
+    } catch { Say "  mpv.net install failed: $($_.Exception.Message)" 'Red' }
     $mpv = Find-MpvNet
-    if ($mpv -and -not $Force) {
-        Say "[ok] mpv.net: $mpv" 'Green'
-    } elseif ($CheckOnly) {
-        Say '[missing] mpv.net (optional, for the live preview)' 'Yellow'
-    } else {
-        Say 'Installing mpv.net (for the live preview)...'
-        try {
-            if ($Force -or -not ($useWinget -and (Invoke-Winget 'mpv.net'))) { Install-MpvDirect }
-        } catch { Say "  mpv.net install failed: $($_.Exception.Message)" 'Red' }
-        $mpv = Find-MpvNet
-        if ($mpv) { Say "[ok] mpv.net: $mpv" 'Green' } else { Say '[problem] mpv.net: not installed. The app still works; only the live preview is unavailable.' 'Yellow' }
-    }
+    if ($mpv) { Say "[ok] mpv.net: $mpv" 'Green' } else { Say '[problem] mpv.net: still not found' 'Red'; $failed += 'mpv.net' }
 }
 
 if (-not $CheckOnly) { Publish-EnvironmentChange }

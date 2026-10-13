@@ -24,7 +24,7 @@ It was built around Fujifilm footage (X-H2S 6.2K open gate, X-T5 6.2K/4K, F-Log2
 - Windows 10 or 11 (64-bit)
 - [FFmpeg](https://www.gyan.dev/ffmpeg/builds/) **full** build on your `PATH` (needs `libx265`, `libsvtav1`, `zscale` and, for the analyser, `libvmaf`)
 - [ExifTool](https://exiftool.org/) on your `PATH` as `exiftool.exe`
-- Optional, for the preview: [mpv.net](https://github.com/mpvnet-player/mpv.net) (installed in the default location, or placed in an `mpv.net` folder next to the app)
+- [mpv.net](https://github.com/mpvnet-player/mpv.net) for the preview (installed in the default location, or placed in an `mpv.net` folder next to the app)
 
 The installer can set these up for you (see below). LUTs are not included; Fujifilm publishes official F-Log/F-Log2 LUTs on its website.
 
@@ -34,8 +34,7 @@ The installer can set these up for you (see below). LUTs are not included; Fujif
 
 Download **`Ideal-Video-Encoder-Setup-<version>.exe`** from the [Releases](../../releases) page and run it. It installs the app for your user account (no admin rights needed), adds Start menu shortcuts and an uninstaller, and can install any missing prerequisites:
 
-- **FFmpeg** (full build) and **ExifTool**, required
-- **mpv.net**, optional, for the live preview
+- **FFmpeg** (full build), **ExifTool** and **mpv.net**
 
 Prerequisites already on your `PATH` and complete are left alone. Missing ones are installed per-user with [winget](https://learn.microsoft.com/windows/package-manager/winget/), or downloaded from their official sites (gyan.dev, exiftool.org, mpv.net) if winget isn't available. You can re-run this any time from the Start menu entry **Ideal Video Encoder - Install or repair prerequisites**, or directly:
 
@@ -134,7 +133,7 @@ This writes `dist\Ideal-Video-Encoder-Setup-<version>.exe`, using the version se
 - **Windows SmartScreen or antivirus warns about the .exe.** Executables built with ps2exe are unsigned and sometimes flagged. You can run the `.ps1` directly instead, or build the exe yourself.
 - **"libvmaf" or "zscale" errors.** Your FFmpeg build is missing a library; use a "full" build.
 - **No embedded preview.** Install mpv.net, or put its folder (containing `libmpv-2.dll`) in an `mpv.net` folder next to the app.
-- **Preview is slow on 6K files.** 4:2:2 HEVC from recent cameras usually can't be decoded by the GPU, so the preview falls back to the CPU. The final encode is unaffected.
+- **Preview performance.** 4:2:2 HEVC from recent cameras usually can't be decoded by the GPU, so the preview always decodes on the CPU using all cores (`hwdec=no`, `vd-lavc-threads=0`), with a decode queue, bilinear scaling and a large demuxer cache. It renders with `gpu-next` on Vulkan, falling back to Direct3D 11 automatically. "Open in mpv.net" uses the same settings. The final encode is unaffected.
 
 ## Credits
 

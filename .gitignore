@@ -7,3 +7,6 @@ dist/
 *.MOV
 *.mp4
 *.csv
+
+# macOS Finder metadata
+.DS_Store
