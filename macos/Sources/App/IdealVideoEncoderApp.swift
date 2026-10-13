@@ -41,9 +41,18 @@ struct IdealVideoEncoderApp: App {
                     .disabled(delegate.model.isLocked || delegate.model.items.isEmpty)
             }
             CommandGroup(after: .appSettings) {
-                Button("Tools Setup…") { delegate.model.showSetup = true }
+                Button("Tools Setup…") {
+                    if delegate.model.showSetup { delegate.model.setupRequests += 1 } else { delegate.model.showSetup = true }
+                }
             }
         }
+
+        Window("Tools Setup", id: "setup") {
+            SetupView()
+                .environment(delegate.model)
+        }
+        .windowResizability(.contentSize)
+        .defaultPosition(.center)
 
         Settings {
             ToolSettingsView()

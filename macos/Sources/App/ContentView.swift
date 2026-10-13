@@ -11,6 +11,7 @@ struct ContentView: View {
     @Environment(AppModel.self) private var model
     @State private var showInspector = true
     @State private var dropTargeted = false
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         @Bindable var model = model
@@ -72,7 +73,7 @@ struct ContentView: View {
                presenting: model.warning) { _ in
             Button("OK") { model.warning = nil }
         } message: { w in Text(w.text) }
-        .sheet(isPresented: $model.showSetup) { SetupView() }
+        .onChange(of: model.setupRequests) { _, _ in openWindow(id: "setup") }
         .task { await model.launchCheck() }
         .frame(minWidth: 960, minHeight: 640)
     }
@@ -83,7 +84,7 @@ struct ToolsStatusButton: View {
     @Environment(AppModel.self) private var model
     var body: some View {
         let ok = model.toolReport?.isComplete ?? true
-        Button { model.showSetup = true } label: {
+        Button { if model.showSetup { model.setupRequests += 1 } else { model.showSetup = true } } label: {
             Label(ok ? "Tools" : "Tools need attention", systemImage: ok ? "wrench.and.screwdriver" : "exclamationmark.triangle")
         }
         .foregroundStyle(ok ? Color.primary : Color.orange)

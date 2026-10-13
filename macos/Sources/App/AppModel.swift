@@ -68,7 +68,9 @@ final class AppModel {
     var tab: MainTab = .queue
     var warning: WarningMessage?
     var toolReport: ToolReport?
-    var showSetup = false
+    /// Tools Setup is a separate window (a sheet would block Quit); bump `setupRequests` to bring it forward.
+    var showSetup = false { didSet { if showSetup && !oldValue { setupRequests += 1 } } }
+    var setupRequests = 0
     var cpuText = ""
     var cancelling = false
     let analysis = AnalysisModel()

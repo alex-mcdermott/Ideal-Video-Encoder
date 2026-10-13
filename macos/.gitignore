@@ -3,3 +3,4 @@
 build/
 DerivedData/
 Sources/App/Info.plist
+dist/

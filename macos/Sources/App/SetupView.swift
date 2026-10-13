@@ -12,6 +12,7 @@ struct SetupView: View {
     @Environment(AppModel.self) private var model
     @State private var installer = Installer()
     @State private var confirmInstall = false
+    @Environment(\.dismissWindow) private var dismissWindow
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -101,7 +102,7 @@ struct SetupView: View {
                     .onChange(of: installer.output.count) { _, _ in proxy.scrollTo("end") }
                     .accessibilityLabel("Installer output")
                 }
-                if let code = installer.exitCode {
+                if let code = installer.exitCode, code != 0 || model.toolReport?.isComplete != true {
                     Text(installer.resultText(code)).foregroundStyle(code == 0 ? .green : .orange)
                 }
             }
@@ -116,13 +117,15 @@ struct SetupView: View {
                     Button("Install Missing Tools…") { confirmInstall = true }
                         .disabled(installer.running)
                 }
-                Button(model.toolReport?.isComplete == true ? "Done" : "Continue Anyway") { model.dismissSetup() }
+                Button(model.toolReport?.isComplete == true ? "Done" : "Continue Anyway") { model.dismissSetup(); dismissWindow(id: "setup") }
                     .keyboardShortcut(.defaultAction)
                     .disabled(installer.running)
             }
         }
         .padding(20)
         .frame(width: 640)
+        // Closing the window counts as "Continue Anyway"
+        .onDisappear { if model.showSetup && !installer.running { model.dismissSetup() } }
         .confirmationDialog("Install the missing tools with Homebrew?", isPresented: $confirmInstall) {
             Button("Install") { Task { await installer.run(model: model) } }
             Button("Cancel", role: .cancel) {}
