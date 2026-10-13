@@ -67,6 +67,47 @@ case "args":
         for a in cmd.arguments { print(a) }
     } catch { fail(error.localizedDescription) }
 
+case "encode":
+    // Runs the real worker with the saved settings, overridden by flags. Ctrl-C cancels.
+    let (files, f) = options(argv.dropFirst(2))
+    guard !files.isEmpty else { fail(usage) }
+    var s = settings
+    if let c = f["codec"].flatMap(Codec.init(rawValue:)) { s.codec = c }
+    if let v = f["crf"] { s.setCrf(v, for: s.codec) }
+    if let g = f["grain"].flatMap(Int.init).flatMap(Grain.init(rawValue:)) { s.grainLevel = g }
+    if let v = f["cap"] { if v == "off" { s.vbrEnabled = false } else { s.vbrEnabled = true; s.maxRate = v } }
+    if let v = f["lut"] { s.lutPath = v; s.lutEnabled = !v.isEmpty }
+    if let v = f["outdir"] { s.outputMode = .custom; s.outputFolder = v }
+    if let v = f["sub"] { s.subfolder = v }
+    if let v = f["csv"] { s.csvEnabled = true; s.csvPath = v }
+    if f["auto-crf"] != nil { s.autoCrf = true }
+    if f["auto-grain"] != nil { s.autoGrain = true }
+    let report = await ToolReport.check(settings: s)
+    guard let tools = report.toolPaths else { fail("missing tools: \(report.missingTools.map(\.rawValue))") }
+    let opt: RunOptions
+    do { opt = try RunOptions.validate(settings: s, exposure: Double(f["ev"] ?? "0") ?? 0, trimStart: f["start"] ?? "", trimEnd: f["end"] ?? "") }
+    catch { fail(error.localizedDescription) }
+    let worker = EncodeWorker(tools: tools, hasZscale: report.hasZscale)
+    let task = Task {
+        await worker.run(jobs: files, options: opt) { e in
+            switch e {
+            case .log(let t): print("[log] \(t)")
+            case .item(let p, let st, let state, let pr, let d):
+                if !st.hasPrefix("Encoding") || (pr.map { Int($0) % 25 == 0 } ?? false) {
+                    print("[item] \((p as NSString).lastPathComponent): \(st) (\(state.rawValue)) \(d ?? "")")
+                }
+            case .overall: break
+            case .finished(let ok, let failed, let cancelled, let elapsed):
+                print("[end] ok=\(ok) failed=\(failed) cancelled=\(cancelled) elapsed=\(Fmt.clock(elapsed))")
+            }
+        }
+    }
+    signal(SIGINT, SIG_IGN)
+    let sigint = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+    sigint.setEventHandler { print("[cli] cancelling"); task.cancel() }
+    sigint.resume()
+    await task.value
+
 default:
     fail(usage)
 }

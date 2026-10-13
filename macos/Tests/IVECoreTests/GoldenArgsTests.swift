@@ -13,6 +13,7 @@ private let src = "/Volumes/Card/DCIM/DSCF0001.MOV"
 private let out = "/Volumes/Card/DCIM/From FFmpeg/DSCF0001.MOV"
 private let x265Off = "aq-mode=3:aq-strength=1.2:psy-rd=2:psy-rdoq=1:qg-size=16:sao=1:rect=1:amp=1"
 private let x265Light = "aq-mode=3:aq-strength=1.0:psy-rd=2:psy-rdoq=4:qg-size=16:sao=0:strong-intra-smoothing=0:deblock=-1,-1:rect=1:amp=1"
+private let tag = EncodeCommand.bt709Tagging
 private let tail = ["-c:a", "aac", "-b:a", "320k", "-ar", "48000", "-ac", "2",
                     "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv",
                     "-movflags", "+faststart"]
@@ -22,7 +23,7 @@ struct GoldenArgsTests {
     @Test func hevcDefaults() {
         let cmd = EncodeCommand(source: src, output: out, codec: .hevc, crf: 21, grain: .off, cap: 35, exposure: 0,
                                 lutPath: nil, isFullRange: false, width: 6240, height: 4160)
-        #expect(cmd.arguments == ["-y", "-nostdin", "-hide_banner", "-i", src,
+        #expect(cmd.arguments == ["-y", "-nostdin", "-hide_banner", "-i", src, "-vf", tag,
                                   "-c:v", "libx265", "-preset", "slow", "-crf", "21", "-maxrate", "35M", "-bufsize", "70M",
                                   "-x265-params", x265Off, "-pix_fmt", "yuv420p10le", "-tag:v", "hvc1"] + tail + [out])
     }
@@ -32,7 +33,7 @@ struct GoldenArgsTests {
         let cmd = EncodeCommand(source: src, output: out, codec: .hevc, crf: 19, grain: .light, cap: 0, exposure: 0.5,
                                 lutPath: lut, isFullRange: true, width: 3840, height: 2160, trimStart: 1.5, trimEnd: 10)
         let vf = "lutyuv=y=val+0.0369*(maxval-minval),format=gbrp10le,lut3d=file='/Users/me/LUTs/F\\:Log2 Bob'\\\\\\''s.cube',zscale=rangein=full:range=limited:matrix=709"
-        #expect(cmd.arguments == ["-y", "-nostdin", "-hide_banner", "-ss", "1.5", "-to", "10", "-i", src, "-vf", vf,
+        #expect(cmd.arguments == ["-y", "-nostdin", "-hide_banner", "-ss", "1.5", "-to", "10", "-i", src, "-vf", vf + "," + tag,
                                   "-c:v", "libx265", "-preset", "slow", "-crf", "19",
                                   "-x265-params", x265Light, "-pix_fmt", "yuv420p10le", "-tag:v", "hvc1"] + tail + [out])
     }
@@ -41,7 +42,7 @@ struct GoldenArgsTests {
         let cmd = EncodeCommand(source: src, output: out, codec: .hevc, crf: 23, grain: .strong, cap: 12.5, exposure: -1.3,
                                 lutPath: nil, isFullRange: false, width: 1920, height: 1080, trimStart: 90)
         #expect(cmd.arguments == ["-y", "-nostdin", "-hide_banner", "-ss", "90", "-i", src,
-                                  "-vf", "lutyuv=y=val-0.0959*(maxval-minval)",
+                                  "-vf", "lutyuv=y=val-0.0959*(maxval-minval)," + tag,
                                   "-c:v", "libx265", "-preset", "slow", "-crf", "23", "-maxrate", "12.5M", "-bufsize", "25M",
                                   "-tune", "grain", "-x265-params", "qg-size=16:rect=1:amp=1",
                                   "-pix_fmt", "yuv420p10le", "-tag:v", "hvc1"] + tail + [out])
@@ -52,7 +53,7 @@ struct GoldenArgsTests {
         let cmd = EncodeCommand(source: src, output: o, codec: .av1, crf: 28, grain: .light, cap: 60, exposure: 0,
                                 lutPath: "/l/a.cube", isFullRange: false, width: 6240, height: 4160, trimEnd: 5)
         #expect(cmd.arguments == ["-y", "-nostdin", "-hide_banner", "-to", "5", "-i", src,
-                                  "-vf", "format=gbrp10le,lut3d=file='/l/a.cube'",
+                                  "-vf", "format=gbrp10le,lut3d=file='/l/a.cube'," + tag,
                                   "-c:v", "libsvtav1", "-preset", "5", "-crf", "28", "-maxrate", "60M", "-bufsize", "120M",
                                   "-svtav1-params", "tune=0:film-grain=6:film-grain-denoise=0", "-pix_fmt", "yuv420p10le"] + tail + [o])
     }
@@ -62,7 +63,7 @@ struct GoldenArgsTests {
         let cmd = EncodeCommand(source: src, output: o, codec: .av1, crf: 35, grain: .strong, cap: 0, exposure: 2,
                                 lutPath: nil, isFullRange: true, width: 4096, height: 2304)
         #expect(cmd.arguments == ["-y", "-nostdin", "-hide_banner", "-i", src,
-                                  "-vf", "lutyuv=y=val+0.1476*(maxval-minval),zscale=rangein=full:range=limited:matrix=709",
+                                  "-vf", "lutyuv=y=val+0.1476*(maxval-minval),zscale=rangein=full:range=limited:matrix=709," + tag,
                                   "-c:v", "libsvtav1", "-preset", "4", "-crf", "35",
                                   "-svtav1-params", "tune=0:film-grain=12:film-grain-denoise=0", "-pix_fmt", "yuv420p10le"] + tail + [o])
     }

@@ -341,3 +341,15 @@ import Testing
                 ToolLocator.searchDirectories.contains { ToolLocator.locate(.ffmpeg, path: "")!.hasPrefix($0) })
     }
 }
+
+@Suite struct ScheduleTests {
+
+    @Test func schedule() {
+        var cal = Calendar(identifier: .gregorian); cal.timeZone = TimeZone(identifier: "Europe/London")!
+        let now = cal.date(from: DateComponents(year: 2026, month: 3, day: 1, hour: 14, minute: 30))!
+        #expect(StartSchedule.now.nextStart(after: now, calendar: cal) == now)
+        #expect(StartSchedule.sevenPM.nextStart(after: now, calendar: cal) == cal.date(from: DateComponents(year: 2026, month: 3, day: 1, hour: 19))!)
+        #expect(StartSchedule.onePM.nextStart(after: now, calendar: cal) == cal.date(from: DateComponents(year: 2026, month: 3, day: 2, hour: 13))!)
+        #expect(StartSchedule.fourAM.nextStart(after: now, calendar: cal) == cal.date(from: DateComponents(year: 2026, month: 3, day: 2, hour: 4))!)
+    }
+}

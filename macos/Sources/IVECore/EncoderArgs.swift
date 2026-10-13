@@ -107,15 +107,23 @@ public struct EncodeCommand: Sendable, Equatable {
         self.trimStart = trimStart; self.trimEnd = trimEnd
     }
 
+    /// The script's filter chain (exposure -> LUT -> range).
     public var filters: [String] { FilterChain.filters(exposure: exposure, lutPath: lutPath, isFullRange: isFullRange) }
+
+    /// macOS addition: FFmpeg 7.1+ takes colour primaries/transfer from the frames and ignores
+    /// `-color_primaries`/`-color_trc` when the source is untagged, so the output would say "unknown".
+    /// Tagging the frames (metadata only, pixels untouched) restores the BT.709 tags the script asks for.
+    public static let bt709Tagging = "setparams=color_primaries=bt709:color_trc=bt709"
+
+    /// The filters actually passed to ffmpeg.
+    public var encodeFilters: [String] { filters + [Self.bt709Tagging] }
 
     public var arguments: [String] {
         var a = ["-y", "-nostdin", "-hide_banner"]
         if let s = trimStart { a += ["-ss", Fmt.num(s)] }
         if let e = trimEnd { a += ["-to", Fmt.num(e)] }
         a += ["-i", source]
-        let vf = filters
-        if !vf.isEmpty { a += ["-vf", vf.joined(separator: ",")] }
+        a += ["-vf", encodeFilters.joined(separator: ",")]
         a += CodecArgs.video(codec: codec, crf: crf, cap: cap, grain: grain, width: width, height: height)
         a += CodecArgs.audio
         a += CodecArgs.colorTags + ["-movflags", "+faststart"]
