@@ -135,6 +135,56 @@ This writes `dist\Ideal-Video-Encoder-Setup-<version>.exe`, using the version se
 - **No embedded preview.** Install mpv.net, or put its folder (containing `libmpv-2.dll`) in an `mpv.net` folder next to the app.
 - **Preview performance.** 4:2:2 HEVC from recent cameras usually can't be decoded by the GPU, so the preview always decodes on the CPU using all cores (`hwdec=no`, `vd-lavc-threads=0`), with a decode queue, bilinear scaling and a large demuxer cache. It renders with `gpu-next` on Vulkan, falling back to Direct3D 11 automatically. "Open in mpv.net" uses the same settings. The final encode is unaffected.
 
+## macOS
+
+A native Mac version lives in [`macos/`](macos/): a SwiftUI app with the same encoder, analyser, quality target mode and settings as the Windows version, and a built-in AVFoundation preview instead of mpv.
+
+![Ideal Video Encoder on macOS](assets/screenshot-macos.png)
+
+### Requirements
+
+- macOS 14 Sonoma or later, Apple silicon or Intel
+- [Homebrew](https://brew.sh) with `ffmpeg` (including `libx265`, `libsvtav1`, `zscale`, `lut3d`, `lutyuv` and, for the analyser, `libvmaf`) and `exiftool`
+
+Homebrew's standard `ffmpeg` is built without zimg, so it has no `zscale`, which full-range camera files (for example Fujifilm 4:2:2 HEVC) need. Install the `homebrew-ffmpeg` tap build instead:
+
+```sh
+brew install exiftool
+brew uninstall ffmpeg            # only if Homebrew's standard ffmpeg is installed
+brew tap homebrew-ffmpeg/ffmpeg
+brew install homebrew-ffmpeg/ffmpeg/ffmpeg --with-zimg --with-libvmaf   # builds from source, 10-30 minutes
+```
+
+Or let the app do it: on first launch, **Tools Setup** lists exactly what is missing, and **Install Missing Tools** runs [`macos/install-prerequisites.sh`](macos/install-prerequisites.sh) (which you can also run yourself; `--check-only` just reports). It never installs Homebrew itself. The app finds the tools in `/opt/homebrew/bin`, `/usr/local/bin` or `PATH` (apps opened from Finder don't see your shell's `PATH`), and **Settings** lets you point it at other copies.
+
+### Installing
+
+Download `Ideal-Video-Encoder-<version>-macOS.zip` from the [Releases](../../releases) page, unzip it and move **Ideal Video Encoder** to Applications.
+
+The app is signed ad hoc, not notarised, so macOS blocks the first launch. Open it once, then go to **System Settings > Privacy & Security**, find the message about Ideal Video Encoder and click **Open Anyway**. Alternatively, in Terminal:
+
+```sh
+xattr -dr com.apple.quarantine "/Applications/Ideal Video Encoder.app"
+```
+
+### Building
+
+```sh
+brew install xcodegen
+cd macos
+./build.sh            # Release build -> macos/dist/Ideal Video Encoder.app and a zip
+./build.sh --test     # run the unit tests first
+```
+
+Needs Xcode 16 or later. The project is generated from `macos/project.yml`. Integration tests (real encodes and VMAF on synthetic clips) run with `TEST_RUNNER_IVE_INTEGRATION=1 xcodebuild -project IdealVideoEncoder.xcodeproj -scheme IVECore test`, and `macos/Tests/UI/e2e.sh` drives the built app through the accessibility API.
+
+### Differences from the Windows version
+
+- **Preview**: built in (AVFoundation and Core Image), no mpv needed. Exposure and the LUT are applied to encoded values like the encode; preview frames match FFmpeg's rendering to within 1/255 on average. Files macOS can't decode play from a preview copy made with FFmpeg.
+- **Settings** are stored in `~/Library/Application Support/Ideal Video Encoder/settings.json`, with the same keys as on Windows.
+- **Colour tags**: encodes add `setparams=color_primaries=bt709:color_trc=bt709`, because newer FFmpeg versions otherwise leave the primaries and transfer of untagged sources as "unknown".
+- **Text size**: View > Bigger / Smaller (Cmd-+ / Cmd--).
+
 ## Credits
 
 Built on [FFmpeg](https://ffmpeg.org/), [x265](https://www.videolan.org/developers/x265.html), [VMAF](https://github.com/Netflix/vmaf), [mpv](https://mpv.io/) / [mpv.net](https://github.com/mpvnet-player/mpv.net), [ExifTool](https://exiftool.org/) and [ps2exe](https://github.com/MScholtes/PS2EXE).
