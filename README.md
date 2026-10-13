@@ -1,6 +1,6 @@
 # Ideal Video Encoder
 
-A Windows and Mac app that turns large in-camera video files into compact, high-quality 10-bit HEVC (H.265) or AV1 files — with a live LUT and exposure adjustment preview, a batch queue, full metadata cloning and a built-in analyser that measures your own footage to suggest encoder settings.
+A Windows app (Mac coming soon) that turns large in-camera video files into compact, high-quality 10-bit HEVC (H.265) or AV1 files — with a live LUT and exposure adjustment preview, a batch queue, full metadata cloning and a built-in analyser that measures your own footage to suggest encoder settings.
 
 It was built around Fujifilm footage (X-H2S 6.2K open gate, X-T5 6.2K/4K, F-Log2) but works with any `.MOV` or `.MP4` that FFmpeg can read.
 
