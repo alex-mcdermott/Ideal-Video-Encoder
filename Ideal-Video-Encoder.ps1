@@ -1525,6 +1525,36 @@ $Xaml = @'
       </Setter>
     </Style>
 
+    <Style TargetType="ContextMenu">
+      <Setter Property="Foreground" Value="{StaticResource Text}"/>
+      <Setter Property="HasDropShadow" Value="True"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ContextMenu">
+            <Border Background="{StaticResource Flyout}" BorderBrush="{StaticResource FlyoutStroke}" BorderThickness="1" CornerRadius="8" Padding="4" MinWidth="200">
+              <StackPanel IsItemsHost="True" KeyboardNavigation.DirectionalNavigation="Cycle"/>
+            </Border>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style TargetType="MenuItem">
+      <Setter Property="Foreground" Value="{StaticResource Text}"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="MenuItem">
+            <Border x:Name="bd" Background="Transparent" CornerRadius="4" Padding="12,8" Margin="0,1">
+              <ContentPresenter ContentSource="Header" RecognizesAccessKey="True"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsHighlighted" Value="True"><Setter TargetName="bd" Property="Background" Value="{StaticResource Subtle}"/></Trigger>
+              <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.4"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
     <Style TargetType="ToolTip">
       <Setter Property="Foreground" Value="{StaticResource Text}"/>
       <Setter Property="Template">
@@ -1672,19 +1702,29 @@ $Xaml = @'
                 <Grid>
                   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                   <Grid Margin="4,2,4,10">
-                    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                     <TextBlock Style="{StaticResource Caption}" VerticalAlignment="Center" Margin="0,0,12,0"
-                               Text="Analyses each clip in the queue on its own (or only the clips you multi-select): short sample encodes with your current look and grain settings, scored against the source with VMAF, give each clip its own CRF and bitrate cap. Several minutes per 6K clip."/>
+                               Text="Analyses each clip on its own (the selected clips, or every clip from the arrow menu): short sample encodes with your current look and grain settings, scored against the source with VMAF, give each clip its own CRF and bitrate cap. Several minutes per 6K clip."/>
                     <ComboBox x:Name="cmbTarget" Grid.Column="1" Width="200" ToolTip="Quality target. VMAF 100 = indistinguishable from the source">
                       <ComboBoxItem Content="High (VMAF 93)"/>
                       <ComboBoxItem Content="Transparent (VMAF 95)" IsSelected="True"/>
                       <ComboBoxItem Content="Archival (VMAF 97)"/>
                     </ComboBox>
-                    <Button x:Name="btnAnalyze" Grid.Column="2" Style="{StaticResource AccentButton}" Margin="8,0,0,0">
+                    <Button x:Name="btnAnalyze" Grid.Column="2" Style="{StaticResource AccentButton}" Margin="8,0,0,0" ToolTip="Analyse the selected clips">
                       <StackPanel Orientation="Horizontal">
                         <TextBlock Text="&#xE9D9;" Style="{StaticResource Icon}" Margin="0,0,8,0"/>
-                        <TextBlock Text="Analyse"/>
+                        <TextBlock x:Name="txtAnalyzeLabel" Text="Analyse selected"/>
                       </StackPanel>
+                    </Button>
+                    <Button x:Name="btnAnalyzeMore" Grid.Column="3" Style="{StaticResource AccentButton}" Margin="2,0,0,0" Width="32" Padding="0"
+                            ToolTip="More analysis options" AutomationProperties.Name="More analysis options">
+                      <TextBlock Text="&#xE70D;" Style="{StaticResource Icon}" FontSize="10"/>
+                      <Button.ContextMenu>
+                        <ContextMenu Placement="Bottom">
+                          <MenuItem Header="Analyse all clips"/>
+                          <MenuItem Header="Analyse selected clips"/>
+                        </ContextMenu>
+                      </Button.ContextMenu>
                     </Button>
                   </Grid>
                   <ListBox x:Name="lstAnalysis" Grid.Row="1" Style="{StaticResource QueueList}" ItemContainerStyle="{StaticResource QueueItem}">
@@ -2093,6 +2133,9 @@ function Update-QueueState {
     $pnlEmpty.Visibility = if ($n) { 'Collapsed' } else { 'Visible' }
     $locked = ($script:RunState -eq 'running' -or $script:RunState -eq 'analysing')
     $btnAnalyze.IsEnabled = ($script:RunState -eq 'idle') -and $n -gt 0
+    $btnAnalyzeMore.IsEnabled = $btnAnalyze.IsEnabled
+    $sel = $lstQueue.SelectedItems.Count
+    $txtAnalyzeLabel.Text = if ($sel -gt 1) { "Analyse $sel selected" } elseif ($sel -eq 1) { 'Analyse selected' } else { 'Analyse all' }
     $pnlAnaEmpty.Visibility = if ($script:AnaItems.Count) { 'Collapsed' } else { 'Visible' }
     $btnAdd.IsEnabled = -not $locked
     $btnClear.IsEnabled = (-not $locked) -and $n -gt 0
@@ -2554,11 +2597,11 @@ function Start-Worker([scriptblock]$body, [string[]]$jobs, [hashtable]$opt) {
     $txtEta.Text = ''
 }
 
-function Start-Analysis {
+function Start-Analysis([switch]$All) {
     if ($script:Worker -or $script:RunState -ne 'idle') { return }
-    # Every clip, each analysed on its own; a multi-selection narrows it (the first clip is always auto-selected)
-    $targets = @($lstQueue.SelectedItems)
-    if ($targets.Count -lt 2) { $targets = @($script:Items) }
+    # Each clip is analysed on its own: the selected clips, or the whole queue (-All, or when nothing is selected)
+    $targets = if ($All) { @($script:Items) } else { @($lstQueue.SelectedItems) }
+    if ($targets.Count -eq 0) { $targets = @($script:Items) }
     if ($targets.Count -eq 0) { Show-Warning 'Add some clips first.'; return }
     $vmafOk = (Invoke-Hidden 'ffmpeg' @('-hide_banner', '-filters')) -match '\blibvmaf\b'
     if (-not $vmafOk) { Show-Warning 'Your ffmpeg build has no libvmaf filter, which the analysis needs. The gyan.dev "full" build includes it.'; return }
@@ -2824,6 +2867,13 @@ $btnCancel.Add_Click({
 
 # Analysis
 $btnAnalyze.Add_Click({ Start-Analysis })
+$btnAnalyzeMore.Add_Click({
+    $menu = $btnAnalyzeMore.ContextMenu
+    $menu.PlacementTarget = $btnAnalyzeMore
+    $menu.IsOpen = $true
+})
+$btnAnalyzeMore.ContextMenu.Items[0].Add_Click({ Start-Analysis -All })
+$btnAnalyzeMore.ContextMenu.Items[1].Add_Click({ Start-Analysis })
 $btnAnaPerClip.Add_Click({
     $n = 0
     foreach ($path in @($script:AnaResults.Keys)) {

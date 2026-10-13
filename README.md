@@ -90,7 +90,7 @@ Choose **HEVC** when files need to play everywhere (Apple Photos on older device
 
 ![Analysis tab](assets/screenshot-analysis.png)
 
-Pick a quality target (High = VMAF 93, Transparent = 95, Archival = 97) and press **Analyse**. It analyses every clip in the queue on its own (or only the clips you multi-select). For each clip it:
+Pick a quality target (High = VMAF 93, Transparent = 95, Archival = 97) and press **Analyse selected**, or choose **Analyse all clips** from the arrow next to it. Each clip is analysed on its own. For each clip it:
 
 1. Encodes one or two 3-second samples with your current look (exposure, LUT) and grain settings, using the real encoder settings.
 2. Scores each sample against the identically filtered source with VMAF, and searches for the **highest CRF that still meets the target** (usually 4-6 test encodes).
