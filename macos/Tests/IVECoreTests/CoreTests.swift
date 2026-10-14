@@ -112,7 +112,7 @@ import Testing
         s.codec = .av1; s.crfHevc = "19"; s.crfAv1 = "30"; s.autoCrf = true; s.grainLevel = .strong; s.autoGrain = true
         s.vbrEnabled = false; s.maxRate = "60"; s.lutPath = lut.path; s.lutEnabled = true; s.outputMode = .custom
         s.outputFolder = "/Volumes/Out"; s.subfolder = ""; s.csvEnabled = true; s.csvPath = "/tmp/log.csv"; s.ffmpegPath = "/opt/x/ffmpeg"
-        s.qualityTarget = 97; s.scheduleTime = "4:30 pm"
+        s.qualityTarget = 97; s.scheduleTime = "4:30 pm"; s.audioEnabled = false; s.normalizeAudio = true
         let store = SettingsStore(url: tempURL())
         try store.save(s)
         #expect(try store.load() == s)
@@ -121,7 +121,8 @@ import Testing
         let obj = try JSONSerialization.jsonObject(with: Data(contentsOf: store.url)) as! [String: Any]
         #expect(Set(obj.keys) == ["Codec", "CrfHevc", "CrfAv1", "AutoCrf", "GrainLevel", "AutoGrain", "VbrEnabled", "MaxRate", "LutPath",
                                   "LutEnabled", "OutputMode", "OutputFolder", "Subfolder", "CsvEnabled", "CsvPath", "FfmpegPath",
-                                  "QualityTarget", "ScheduleTime"])
+                                  "QualityTarget", "ScheduleTime", "AudioEnabled", "NormalizeAudio"])
+        #expect(obj["AudioEnabled"] as? Bool == false && obj["NormalizeAudio"] as? Bool == true)
         #expect(obj["QualityTarget"] as? Int == 97)
         #expect(obj["ScheduleTime"] as? String == "4:30 pm")
         #expect(obj["CrfHevc"] as? String == "19")
@@ -176,6 +177,7 @@ import Testing
         #expect(!s.vbrEnabled)              // missing flag reads as false, as [bool]$null does
         #expect(s.subfolder == "Out")
         #expect(s.qualityTarget == 0 && s.scheduleTime == "04:00")   // v1.0 files: defaults
+        #expect(s.audioEnabled && !s.normalizeAudio)                 // AudioEnabled missing: on
     }
 }
 
@@ -213,6 +215,18 @@ import Testing
         #expect(message(s) == "The output folder must be a full path, e.g. /Volumes/Exports.")
         s = AppSettings(); s.subfolder = "../x"
         #expect(message(s) == "Subfolder '../x' is not a valid folder name.")
+    }
+
+    @Test func audioOptions() throws {
+        var s = AppSettings(); s.normalizeAudio = true
+        var o = try RunOptions.validate(settings: s, exposure: 0, trimStart: "", trimEnd: "", speed: 0.25)
+        #expect(o.audioEnabled && o.normalize && o.musicPath == nil && o.speed == 0.25)
+        #expect(o.lookKey == "hevc|0||0|False|0.25")
+        do { _ = try RunOptions.validate(settings: s, exposure: 0, trimStart: "", trimEnd: "", musicOn: true, musicPath: "/no/such.mp3"); Issue.record("no error") }
+        catch { #expect((error as? ProcessError)?.message == "Choose a music file, or turn off \"Replace with a music file\".") }
+        s.audioEnabled = false   // audio off: music and normalise are ignored, no error
+        o = try RunOptions.validate(settings: s, exposure: 0, trimStart: "", trimEnd: "", musicOn: true, musicPath: "/no/such.mp3")
+        #expect(!o.audioEnabled && !o.normalize && o.musicPath == nil)
     }
 
     @Test func autoCrfFallback() throws {
@@ -303,10 +317,13 @@ import Testing
 
     @Test func csv() {
         let notes = CsvLog.notes(codec: .hevc, iso: 400, isFLog2: false, isFullRange: false, exposureText: "0.0", vbvText: "35M")
-        #expect(notes == "Codec=HEVC ISO=400 FLog2=False Range=video EV=0.0 VBV=35M")
+        #expect(notes == "Codec=HEVC ISO=400 FLog2=False Range=video EV=0.0 VBV=35M Speed=1x Audio=clip audio")
+        #expect(CsvLog.notes(codec: .av1, iso: nil, isFLog2: false, isFullRange: true, exposureText: "+0.5", vbvText: "off",
+                             speed: 0.25, audioText: "music: song.mp3, normalised") ==
+                "Codec=AV1 ISO= FLog2=False Range=full EV=+0.5 VBV=off Speed=0.25x Audio=music: song.mp3, normalised")
         let row = CsvLog.row(name: "CLIP0001.MOV", iso: 400, isFLog2: false, crf: 21, grain: .off, origBitrate: 88000000,
                              origSizeMB: 359.3104, newSizeMB: 50.1249, ratio: 86.1, heat: "[6]", notes: notes)
-        #expect(row == #""CLIP0001.MOV",400,False,21,0,88000000,359.31,50.12,86.1,[6],"Codec=HEVC ISO=400 FLog2=False Range=video EV=0.0 VBV=35M""#)
+        #expect(row == #""CLIP0001.MOV",400,False,21,0,88000000,359.31,50.12,86.1,[6],"Codec=HEVC ISO=400 FLog2=False Range=video EV=0.0 VBV=35M Speed=1x Audio=clip audio""#)
         let none = CsvLog.row(name: "a.mov", iso: nil, isFLog2: true, crf: 28, grain: .strong, origBitrate: nil,
                               origSizeMB: 10, newSizeMB: 12, ratio: -20, heat: "[1]", notes: "n")
         #expect(none == #""a.mov",,True,28,2,,10,12,-20,[1],"n""#)

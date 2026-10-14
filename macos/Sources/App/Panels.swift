@@ -32,6 +32,18 @@ extension AppModel {
         appendLog("LUT: \(url.path)")
     }
 
+    /// Picking a file turns on "Replace with a music file"; the path isn't saved (as on Windows).
+    func chooseMusic() {
+        let p = NSOpenPanel()
+        p.title = "Choose a music file"
+        p.allowedContentTypes = SpeedAudio.musicExtensions.compactMap { UTType(filenameExtension: $0) } + [.audio]
+        if !musicPath.isEmpty { p.directoryURL = URL(fileURLWithPath: (musicPath as NSString).deletingLastPathComponent) }
+        guard p.runModal() == .OK, let url = p.url else { return }
+        musicPath = url.path
+        musicOn = true
+        appendLog("Music: \(url.path)")
+    }
+
     func chooseOutputFolder() {
         let p = NSOpenPanel()
         p.title = "Choose Output Folder"

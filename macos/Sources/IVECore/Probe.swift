@@ -15,6 +15,8 @@ public struct MediaInfo: Sendable, Equatable {
     public var formatBitRate: Double?
     public var duration: Double = 0
     public var frameRate: Double?
+    /// `r_frame_rate` as a rational (speed changes conform to it)
+    public var rFrameRate = FrameRate.fallback
     public var hasVideo = false
 
     public init() {}
@@ -35,7 +37,7 @@ public struct MediaInfo: Sendable, Equatable {
 public enum Probe {
     public static func arguments(for path: String) -> [String] {
         ["-v", "error", "-select_streams", "v:0",
-         "-show_entries", "stream=width,height,pix_fmt,color_range,bit_rate,avg_frame_rate:format=duration,bit_rate",
+         "-show_entries", "stream=width,height,pix_fmt,color_range,bit_rate,avg_frame_rate,r_frame_rate:format=duration,bit_rate",
          "-of", "json", path]
     }
 
@@ -57,6 +59,7 @@ public enum Probe {
             m.pixelFormat = s["pix_fmt"] as? String
             m.colorRange = s["color_range"] as? String
             m.streamBitRate = num(s["bit_rate"])
+            m.rFrameRate = FrameRate.parse(s["r_frame_rate"] as? String)
             if let r = s["avg_frame_rate"] as? String {
                 let p = r.split(separator: "/").compactMap { Double($0) }
                 if p.count == 2, p[1] > 0, p[0] > 0 { m.frameRate = p[0] / p[1] }

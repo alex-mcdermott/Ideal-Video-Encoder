@@ -29,6 +29,14 @@ public struct RunOptions: Sendable, Equatable {
     public var qualityTarget = 0
     /// Everything a measured CRF depends on (`Get-LookKey`); per-clip results are reused only when it matches.
     public var lookKey = ""
+    /// Speed (v1.3); not saved, 1 = normal.
+    public var speed = 1.0
+    /// "Include audio".
+    public var audioEnabled = true
+    /// "Normalise loudness" (only with audio on).
+    public var normalize = false
+    /// "Replace with a music file" (only with audio on); not saved.
+    public var musicPath: String?
     /// Per-clip results ("Use per clip" or earlier quality-target runs), by source path.
     public var overrides: [String: ClipOverride] = [:]
 
@@ -40,11 +48,22 @@ public struct RunOptions: Sendable, Equatable {
 
     /// `Get-RunOptions`. Throws a `ProcessError` with the same message the Windows app shows.
     /// `exposure` is the slider value; `trimStart`/`trimEnd` are the raw field texts.
+    /// `speed`, `musicOn` and `musicPath` are session state (not saved), like exposure and trim.
     public static func validate(settings s: AppSettings, exposure: Double, trimStart: String, trimEnd: String,
+                                speed: Double = 1, musicOn: Bool = false, musicPath: String = "",
                                 forAnalysis: Bool = false) throws -> RunOptions {
         var o = RunOptions()
         o.qualityTarget = s.qualityTarget
-        o.lookKey = lookKey(settings: s, exposure: exposure)
+        o.speed = speed
+        o.audioEnabled = s.audioEnabled
+        o.normalize = s.normalizeAudio && s.audioEnabled
+        if s.audioEnabled && musicOn {
+            guard !musicPath.isEmpty, FileManager.default.fileExists(atPath: musicPath) else {
+                throw ProcessError("Choose a music file, or turn off \"Replace with a music file\".")
+            }
+            o.musicPath = musicPath
+        }
+        o.lookKey = lookKey(settings: s, exposure: exposure, speed: speed)
         o.autoCrf = s.autoCrf
         o.autoGrain = s.autoGrain
         o.codec = s.codec
@@ -91,10 +110,10 @@ public struct RunOptions: Sendable, Equatable {
 }
 
 extension RunOptions {
-    /// `Get-LookKey`: "codec|EV|LUT path (when applied)|grain index|auto grain".
-    public static func lookKey(settings s: AppSettings, exposure: Double) -> String {
+    /// `Get-LookKey`: "codec|EV|LUT path (when applied)|grain index|auto grain|speed".
+    public static func lookKey(settings s: AppSettings, exposure: Double, speed: Double = 1) -> String {
         let lut = s.lutEnabled && !s.lutPath.isEmpty && FileManager.default.fileExists(atPath: s.lutPath) ? s.lutPath : ""
-        return "\(s.codec.rawValue)|\(Fmt.num(Fmt.round(exposure, 1)))|\(lut)|\(s.grainLevel.rawValue)|\(s.autoGrain ? "True" : "False")"
+        return "\(s.codec.rawValue)|\(Fmt.num(Fmt.round(exposure, 1)))|\(lut)|\(s.grainLevel.rawValue)|\(s.autoGrain ? "True" : "False")|\(Fmt.num(speed))"
     }
 }
 

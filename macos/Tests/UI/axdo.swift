@@ -9,6 +9,7 @@
 //   axdo <pid> press <label>              AXPress a button/checkbox/radio button/menu item
 //   axdo <pid> set <label> <value>        set a text field / slider value (then confirms with Return)
 //   axdo <pid> increment|decrement <label> [n]   step a slider n times
+//   axdo <pid> scroll <label> <0...1>     scroll the scroll area holding an element (1 = bottom)
 //   axdo <pid> get <label>                print an element's value
 //   axdo <pid> select-row <index>         select row N (0-based) of the first outline/table
 //   axdo <pid> select-rows <i,j,...>      select several rows
@@ -121,6 +122,17 @@ case "increment", "decrement":
         AXUIElementPerformAction(e, (args[2] == "increment" ? kAXIncrementAction : kAXDecrementAction) as CFString)
         usleep(40_000)
     }
+
+case "scroll":
+    // Scrolls the scroll area holding an element: axdo <pid> scroll <label> <0...1>
+    guard args.count > 4, var e = find(args[3]), let v = Double(args[4]) else { fail("usage: scroll <label> <0...1>") }
+    while str(attr(e, kAXRoleAttribute)) != "AXScrollArea" {
+        guard let p = attr(e, kAXParentAttribute) else { fail("not in a scroll area: \(args[3])") }
+        e = p as! AXUIElement
+    }
+    guard let bar = attr(e, kAXVerticalScrollBarAttribute) else { fail("no vertical scroll bar") }
+    let r = AXUIElementSetAttributeValue(bar as! AXUIElement, kAXValueAttribute as CFString, NSNumber(value: v))
+    if r != .success { fail("scroll failed: \(r.rawValue)") }
 
 case "get":
     guard args.count > 3, let e = find(args[3]) else { fail("not found: \(args[3])") }

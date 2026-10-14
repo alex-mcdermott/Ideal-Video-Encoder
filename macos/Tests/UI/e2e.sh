@@ -30,6 +30,13 @@ clip() { ffmpeg -v error -y -f lavfi -i "$1=s=$2:r=30" -t "$3" -c:v libx265 -pre
 clip testsrc2 1280x720 2 "$W/clips/Card A/A001.MOV"
 clip mandelbrot 1280x720 2 "$W/clips/Card A/A002.MOV"
 clip testsrc2 1920x1080 30 "$W/clips/Card B/B001_long.MOV"
+mkdir -p "$W/sound" "$W/music"   # a clip with a quiet tone, and a 1.5 s music file
+ffmpeg -v error -y -f lavfi -i testsrc2=s=1280x720:r=30 -f lavfi -i "sine=frequency=440:sample_rate=48000,volume=-36dB" -t 4 \
+  -c:v libx265 -preset ultrafast -x265-params log-level=error -pix_fmt yuv422p10le -tag:v hvc1 -c:a aac "$W/sound/S001.MOV"
+ffmpeg -v error -y -f lavfi -i "sine=frequency=660:sample_rate=44100,volume=-30dB" -t 1.5 -c:a aac "$W/music/tune.m4a"
+dur()  { ffprobe -v error -show_entries format=duration -of csv=p=0 "$1"; }
+lufs() { ffmpeg -hide_banner -nostdin -i "$1" -map 0:a:0 -af ebur128 -f null - 2>&1 | sed -n '/Summary:/,$p' | awk '/ I:/ {print $2; exit}'; }
+near() { python3 -c "import sys; sys.exit(0 if abs(float('$1') - float('$2')) <= float('$3') else 1)" 2>/dev/null; }
 
 PID=
 launch() {
@@ -136,6 +143,35 @@ ax key 12 cmd; sleep 1; ax press "Stop and Quit"; sleep 3
 check "Stop and Quit quits" bash -c "! pgrep -f '$BIN' >/dev/null"
 check "... and leaves no ffmpeg or partial file" bash -c "! pgrep -f -- '$PART' >/dev/null && [ ! -e '$PART' ]"
 
+echo "== speed and audio (v1.3): 2x and normalise, the preview follows, music needs a file, audio off"
+launch "$W/sound/S001.MOV"
+ax press Speed; sleep 0.3; ax menu "2x"; sleep 0.3
+check "speed hint for 2x" ax exists "Faster. Frames are dropped to keep the frame rate."
+ax press "Normalise loudness"; sleep 0.3
+ax press Start; waitfor Finished 120 || true
+OUT="$W/out/S001.MOV"; D=$(dur "$OUT"); L=$(lufs "$OUT")
+check "2x: 4 s clip encodes to 2 s (got $D)" near "$D" 2.0 0.05
+check "normalised to -16 LUFS (got $L)" near "$L" -16 1
+ax press Preview; sleep 4
+ax press Log; sleep 0.5
+check "preview loops the clip at 2x" bash -c "build/tools/axdo $PID dump | grep -q 'Preview loops 0.00-4.00 s at 2x'"
+check "preview measured the loudness for normalising" bash -c "build/tools/axdo $PID dump | grep -qE 'Preview: loudness -[0-9.]+ LUFS, playing at \+[0-9.]+ dB'"
+shot speed-audio-preview
+ax press "Queue (1)"; sleep 0.3
+ax press "Replace with a music file"; sleep 0.3
+check "music on without a file is flagged" ax exists 'Problem: Choose a music file, or turn off "Replace with a music file".'
+ax press Start; sleep 1
+check "... and Start refuses" ax exists 'Choose a music file, or turn off "Replace with a music file".'
+ax key 36; sleep 0.3
+ax press "Replace with a music file"; sleep 0.3
+ax press "Include audio"; sleep 0.3
+rm -f "$OUT"; ax press Start; waitfor Finished 120 || true
+check "audio off: no audio stream" bash -c "[ -f '$OUT' ] && [ -z \"\$(ffprobe -v error -select_streams a -show_entries stream=index -of csv=p=0 '$OUT')\" ]"
+check "Include audio and Normalise are saved" python3 -c "import json,sys; d=json.load(open('$SETTINGS')); sys.exit(0 if d['AudioEnabled'] is False and d['NormalizeAudio'] is True else 1)"
+ax press "Include audio"; sleep 0.3; ax press "Normalise loudness"; sleep 0.3
+check "speed is not saved: a relaunch is back at 1x" bash -c "pkill -f '$BIN'; sleep 1; open -n -a '$APP' --env IVE_SETTINGS_PATH='$SETTINGS' --args -DismissedSetupProblems 'FFmpeg lacks zscale'; sleep 3; P=\$(pgrep -f '$BIN' | head -1); [ \"\$(build/tools/axdo \$P get Speed)\" = '1x (normal)' ]"
+pkill -f "$BIN"; sleep 1; rm -f "$OUT"
+
 echo "== accessibility: every interactive element in every tab has a name"
 launch "$W/clips/Card A/A001.MOV"
 for tab in "Queue (1)" Analysis Log; do
@@ -170,6 +206,20 @@ for w in l where (w[kCGWindowOwnerPID as String] as? Int) == Int(CommandLine.arg
   osascript -e "tell application \"System Events\" to keystroke \"$W/clips/Card B/B001_long.MOV\""; sleep 1
   osascript -e 'tell application "System Events" to key code 36'; sleep 1.2; osascript -e 'tell application "System Events" to key code 36'; sleep 2
   check "Add Clips panel adds the chosen file" ax exists "B001_long.MOV, Queued"
+
+  echo "== the music file panel"
+  launch "$W/sound/S001.MOV"
+  ax press Speed; sleep 0.3; ax menu "2x"; sleep 0.3
+  ax press "Choose music file"; sleep 2
+  osascript -e 'tell application "System Events" to key code 5 using {command down, shift down}'; sleep 1.2
+  osascript -e "tell application \"System Events\" to keystroke \"$W/music/tune.m4a\""; sleep 1
+  osascript -e 'tell application "System Events" to key code 36'; sleep 1.2; osascript -e 'tell application "System Events" to key code 36'; sleep 2
+  check "choosing a music file shows it and turns the option on" bash -c "[ \"\$(build/tools/axdo $PID get 'Music file')\" = tune.m4a ] && [ \"\$(build/tools/axdo $PID get 'Replace with a music file')\" = 1 ]"
+  ax press Start; waitfor Finished 120 || true
+  D=$(dur "$W/out/S001.MOV")
+  MV=$(ffmpeg -nostdin -ss 1.6 -t 0.2 -i "$W/out/S001.MOV" -af volumedetect -f null - 2>&1 | sed -n 's/.*mean_volume: \(.*\) dB/\1/p')
+  check "music at 2x: 2 s output (got $D)" near "$D" 2.0 0.05
+  check "music looped, not silent after its 1.5 s (got $MV dB)" near "$MV" -52 8
 fi
 
 pkill -f "$BIN"

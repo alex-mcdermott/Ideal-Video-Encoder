@@ -107,6 +107,30 @@ public struct EncodeCommand: Sendable, Equatable {
     public var trimEnd: Double?
     /// Range conversion with zscale (as on Windows) or, when FFmpeg lacks it, the built-in scale filter.
     public var useZscale = true
+    /// Playback speed (Windows v1.3.0); 1 = normal.
+    public var speed = 1.0
+    /// The source's r_frame_rate, which speed changes conform to.
+    public var rate = FrameRate.fallback
+    /// Source duration, for the output length after trim and speed.
+    public var sourceDuration = 0.0
+    public var audio = AudioPlan()
+
+    /// What happens to the soundtrack.
+    public struct AudioPlan: Sendable, Equatable {
+        /// "Include audio"; off writes no audio stream.
+        public var include = true
+        public var sourceHasAudio = true
+        /// "Replace with a music file": looped, faded out at the end, cut to the video length.
+        public var musicPath: String?
+        /// Second-pass loudnorm filter when "Normalise loudness" is on (from the first-pass measurement).
+        public var loudnorm: String?
+        public init(include: Bool = true, sourceHasAudio: Bool = true, musicPath: String? = nil, loudnorm: String? = nil) {
+            self.include = include; self.sourceHasAudio = sourceHasAudio; self.musicPath = musicPath; self.loudnorm = loudnorm
+        }
+        /// Off, or a clip without audio and no music: `-an`, no error.
+        public var active: Bool { include && (musicPath != nil || sourceHasAudio) }
+        public var usesMusic: Bool { include && musicPath != nil }
+    }
 
     public init(source: String, output: String, codec: Codec, crf: Int, grain: Grain, cap: Double, exposure: Double,
                 lutPath: String?, isFullRange: Bool, width: Int, height: Int, trimStart: Double? = nil, trimEnd: Double? = nil) {
@@ -123,17 +147,60 @@ public struct EncodeCommand: Sendable, Equatable {
     /// Tagging the frames (metadata only, pixels untouched) restores the BT.709 tags the script asks for.
     public static let bt709Tagging = "setparams=color_primaries=bt709:color_trc=bt709"
 
-    /// The filters actually passed to ffmpeg.
-    public var encodeFilters: [String] { filters + [Self.bt709Tagging] }
+    /// The filters actually passed to ffmpeg: the look, then the speed change, then BT.709 tagging.
+    public var encodeFilters: [String] { filters + SpeedAudio.speedFilters(speed, rate: rate) + [Self.bt709Tagging] }
 
-    public var arguments: [String] {
-        var a = ["-y", "-nostdin", "-hide_banner"]
+    /// Output length after trim and speed (progress and the music cut are measured against it).
+    public var outDuration: Double {
+        SpeedAudio.outDuration(source: sourceDuration, trimStart: trimStart, trimEnd: trimEnd, speed: speed)
+    }
+
+    /// The clip input, trimmed (also the input of the loudness measurement of the clip's own audio).
+    public var clipInput: [String] {
+        var a: [String] = []
         if let s = trimStart { a += ["-ss", Fmt.num(s)] }
         if let e = trimEnd { a += ["-to", Fmt.num(e)] }
-        a += ["-i", source]
+        return a + ["-i", source]
+    }
+
+    /// The looped music input (also the only input of its loudness measurement, where it is 0:a:0).
+    public var musicInput: [String] { audio.musicPath.map { ["-stream_loop", "-1", "-i", $0] } ?? [] }
+
+    /// Filters before loudnorm: atempo for the clip's audio, none for music (it isn't time-stretched).
+    public var audioPreFilters: [String] { audio.usesMusic ? [] : SpeedAudio.atempoFilters(speed) }
+
+    /// The `-af` chain: atempo, loudnorm, fade-out (music), in that order.
+    public var audioFilters: [String] {
+        var af = audioPreFilters
+        if let l = audio.loudnorm { af.append(l) }
+        if audio.usesMusic, let f = SpeedAudio.fadeFilter(outDuration: outDuration) { af.append(f) }
+        return af
+    }
+
+    /// "clip audio", "no audio" or "music: <name>", plus ", normalised" (detail line and CSV).
+    public var audioText: String {
+        guard audio.active else { return "no audio" }
+        var t = audio.usesMusic ? "music: " + ((audio.musicPath ?? "") as NSString).lastPathComponent : "clip audio"
+        if audio.loudnorm != nil { t += ", normalised" }
+        return t
+    }
+
+    public var arguments: [String] {
+        var a = ["-y", "-nostdin", "-hide_banner"] + clipInput
+        if audio.active && audio.usesMusic { a += musicInput }
+        // Output options only after every input: a -vf before the music input would break the encode
         a += ["-vf", encodeFilters.joined(separator: ",")]
+        a += ["-map", "0:v:0"]
+        if audio.active { a += ["-map", audio.usesMusic ? "1:a:0" : "0:a:0"] }
         a += CodecArgs.video(codec: codec, crf: crf, cap: cap, grain: grain, width: width, height: height)
-        a += CodecArgs.audio
+        if audio.active {
+            a += CodecArgs.audio
+            let af = audioFilters
+            if !af.isEmpty { a += ["-af", af.joined(separator: ",")] }
+            if audio.usesMusic { a += ["-shortest", "-t", Fmt.upTo3(outDuration)] }
+        } else {
+            a += ["-an"]
+        }
         a += CodecArgs.colorTags + ["-movflags", "+faststart"]
         a.append(output)
         return a

@@ -12,15 +12,15 @@ It was built around Fujifilm footage (X-H2S 6.2K open gate, X-T5 6.2K/4K, F-Log2
 
 ## Features
 
-- **Live preview inside the app** (embedded mpv on Windows, AVFoundation on Mac). Exposure, LUT and trim changes update instantly; the preview applies the same look as the final encode.
+- **Live preview inside the app** (embedded mpv on Windows, AVFoundation on Mac). Exposure, LUT, trim, speed and audio changes update instantly; the preview applies the same look as the final encode.
 - **Exposure before the LUT**, in stops, applied in log space at 10-bit precision (calibrated to the F-Log2 curve).
 - **3D LUTs (`.cube`)** applied at 10-bit, with correct full-to-limited range handling for full-range camera files.
 - **HEVC (x265) or AV1 (SVT-AV1)**, 10-bit, with CRF quality control and an optional **bitrate cap** (constrained VBR) for predictable file sizes.
 - **Grain retention** levels (Off / Light / Strong): x265 grain tuning for HEVC, film-grain synthesis for AV1, plus an Auto mode.
 - **Settings analyser**: encodes short samples of each clip, scores them against the source with [VMAF](https://github.com/Netflix/vmaf), and finds the CRF and bitrate cap that hit a quality target. Use the result per clip or for everything.
 - **Quality target mode**: pick a VMAF score instead of a CRF, and every clip is measured just before it's encoded and gets its own CRF and cap.
-- **Speed changes** from 0.125x to 8x (Windows; coming to Mac). Slow motion from high-frame-rate footage (e.g. 120p at 0.25x) is conformed to a normal frame rate so every captured frame is used; other speeds keep the clip's frame rate.
-- **Audio control** (Windows; coming to Mac): keep or remove the soundtrack, normalise loudness (two-pass EBU R128 to -16 LUFS), or replace it with a music file that loops if it's shorter than the clip and fades out at the end. The preview plays the result.
+- **Speed changes** from 0.125x to 8x. Slow motion from high-frame-rate footage (e.g. 120p at 0.25x) is conformed to a normal frame rate so every captured frame is used; other speeds keep the clip's frame rate.
+- **Audio control**: keep or remove the soundtrack, normalise loudness (two-pass EBU R128 to -16 LUFS), or replace it with a music file that loops if it's shorter than the clip and fades out at the end. The preview plays the result.
 - **Batch queue** with per-clip progress, ETA, cancel, a scheduled start at any time you choose (in your computer's time zone, daylight-saving aware) and an optional CSV log.
 - **Metadata kept**: capture date, camera, lens, film simulation, GPS and more are copied with ExifTool, including the Apple QuickTime keys that Photos reads for the camera make and model, and file dates are set to the capture time.
 - **Flexible output**: next to each source clip or in a chosen folder, with an optional subfolder. Never overwrites a source file.
@@ -91,7 +91,7 @@ On first launch, **Tools Setup** checks for FFmpeg, ffprobe and ExifTool and lis
 You can drop clips or folders onto the window, onto the `.exe` in Explorer, or onto the app's Dock icon or open them with it from Finder.
 
 1. **Add clips** to the queue.
-2. Optionally **choose a LUT** and set **exposure**; press **Preview** to check the look.
+2. Optionally **choose a LUT**, set **exposure**, and trim, change the **speed** or the **audio**; press **Preview** to check the result.
 3. Set **quality**: a CRF, an optional bitrate cap, and grain retention — or let the **Analysis** tab suggest them.
 4. Choose where the files go and press **Start**.
 
@@ -204,6 +204,7 @@ The build is universal (Apple silicon and Intel) and signed ad hoc. Integration 
 - **Tools not found.** Apps started from Finder don't see your shell's `PATH`. The app looks in `/opt/homebrew/bin` and `/usr/local/bin`; for FFmpeg elsewhere, set its path in **Settings**, or open **Tools Setup** from the app menu.
 - **The Analysis tab says libvmaf is missing.** Your FFmpeg wasn't built with it; `brew install ffmpeg` has it, or use **Install Missing Tools**.
 - **Preview.** 4:2:2 HEVC from recent Fujifilm cameras is decoded in hardware on Apple silicon (6K plays at close to real time on an M4, with or without a LUT). Files macOS can't decode, such as HEVC tagged `hev1`, play from a preview copy made with FFmpeg.
+- **Preview speed and audio.** At other speeds the preview plays a time-scaled copy of the timeline, so slowed high-frame-rate footage shows every frame, with the clip's audio pitch-preserved; music loops from the start of the trim and fades out at its end, as in the encode. Normalise measures the clip (or the music) once with FFmpeg's `loudnorm` and plays it at the gain that reaches -16 LUFS, with peaks limited to -1.5 dBTP.
 
 Known issues are tracked in [Issues](../../issues).
 

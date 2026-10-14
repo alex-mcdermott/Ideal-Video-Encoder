@@ -192,6 +192,7 @@ public struct AnalysisWorker: Sendable {
         }
         let s = AnalysisClip.samples(duration: info.duration)
         let vf = FilterChain.filters(exposure: opt.exposure, lutPath: opt.lutPath, isFullRange: info.isFullRange, zscale: hasZscale)
+            + SpeedAudio.speedFilters(opt.speed, rate: info.rFrameRate)   // samples see the same speed change as the encode
         // A LUT leaves RGB; convert the reference the way the encoder does (BT.709, limited)
         let refTail = (opt.lutPath?.isEmpty ?? true) ? [] : ["scale=out_color_matrix=bt709:out_range=tv"]
         return (AnalysisClip(id: id, path: path, starts: s.starts, segLen: s.segLen, vf: vf, refTail: refTail, grain: grain,
