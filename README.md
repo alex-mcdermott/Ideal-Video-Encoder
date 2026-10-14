@@ -19,8 +19,10 @@ It was built around Fujifilm footage (X-H2S 6.2K open gate, X-T5 6.2K/4K, F-Log2
 - **Grain retention** levels (Off / Light / Strong): x265 grain tuning for HEVC, film-grain synthesis for AV1, plus an Auto mode.
 - **Settings analyser**: encodes short samples of each clip, scores them against the source with [VMAF](https://github.com/Netflix/vmaf), and finds the CRF and bitrate cap that hit a quality target. Use the result per clip or for everything.
 - **Quality target mode**: pick a VMAF score instead of a CRF, and every clip is measured just before it's encoded and gets its own CRF and cap.
+- **Speed changes** from 0.125x to 8x (Windows; coming to Mac). Slow motion from high-frame-rate footage (e.g. 120p at 0.25x) is conformed to a normal frame rate so every captured frame is used; other speeds keep the clip's frame rate.
+- **Audio control** (Windows; coming to Mac): keep or remove the soundtrack, normalise loudness (two-pass EBU R128 to -16 LUFS), or replace it with a music file that loops if it's shorter than the clip and fades out at the end. The preview plays the result.
 - **Batch queue** with per-clip progress, ETA, cancel, a scheduled start at any time you choose (in your computer's time zone, daylight-saving aware) and an optional CSV log.
-- **Metadata kept**: capture date, camera, lens, GPS and more are copied with ExifTool, including Apple-compatible keys, and file dates are set to the capture time.
+- **Metadata kept**: capture date, camera, lens, film simulation, GPS and more are copied with ExifTool, including the Apple QuickTime keys that Photos reads for the camera make and model, and file dates are set to the capture time.
 - **Flexible output**: next to each source clip or in a chosen folder, with an optional subfolder. Never overwrites a source file.
 - **Native on each platform**: a Windows 11 design that follows your light/dark mode and accent colour with per-monitor high-DPI support, and a SwiftUI Mac app with light/dark mode, your accent colour, VoiceOver labels, keyboard shortcuts and adjustable text size.
 
@@ -143,6 +145,7 @@ Instead of a CRF, set **Encoding > Quality target** to VMAF 93, 95 or 97. Each c
 
 ```
 source -> exposure (lutyuv, 10-bit) -> LUT (lut3d, 10-bit RGB) -> full-to-limited range (zscale, if needed)
+       -> speed (setpts + fps, if not 1x)
        -> HEVC: x265 10-bit 4:2:0, preset slow, CRF [+ VBV cap] -> .MOV (hvc1, BT.709, faststart)
        -> AV1:  SVT-AV1 10-bit 4:2:0, tune=0, CRF [+ cap]      -> .MP4 (BT.709, faststart)
        -> ExifTool metadata
@@ -151,7 +154,7 @@ source -> exposure (lutyuv, 10-bit) -> LUT (lut3d, 10-bit RGB) -> full-to-limite
 - x265: `aq-mode=3:aq-strength=1.2:psy-rd=2:psy-rdoq=1:qg-size=16:sao=1:rect=1:amp=1`. Grain **Light**: SAO and strong-intra-smoothing off, `psy-rdoq=4`, `deblock=-1,-1`. Grain **Strong**: x265 `tune=grain`.
 - SVT-AV1: preset 4 up to 4K, preset 5 above (SVT-AV1 does not allow slower presets for its "8K class"). Grain **Light** / **Strong**: AV1 film-grain synthesis (`film-grain=6` / `12`, no denoising), which recreates grain at playback instead of spending bits on it.
 - Bitrate cap: `-maxrate <cap> -bufsize <2x cap>` (both codecs).
-- Audio: AAC 320 kb/s stereo.
+- Audio: AAC 320 kb/s stereo. Speed changes use `atempo` (pitch preserved). Normalise measures with `loudnorm` first, then applies it in linear mode (`I=-16:TP=-1.5:LRA=11`). A music file is looped with `-stream_loop`, faded out over the last 2 seconds (less on very short clips) and cut to the video length.
 - On Mac, the range step uses FFmpeg's built-in `scale` filter when `zscale` isn't available, and every encode adds `setparams=color_primaries=bt709:color_trc=bt709`, because FFmpeg 7.1 and later otherwise leave the primaries and transfer of untagged sources as "unknown".
 
 ## Building
