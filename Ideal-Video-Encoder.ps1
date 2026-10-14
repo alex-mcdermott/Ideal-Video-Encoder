@@ -1667,7 +1667,7 @@ $Xaml = @'
     <!-- Header -->
     <Grid Margin="2,0,2,16">
       <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-        <Image Source="{StaticResource AppIcon}" Width="32" Height="32" Margin="0,0,12,0"/>
+        <Image x:Name="imgAppIcon" Source="{StaticResource AppIcon}" Width="32" Height="32" Margin="0,0,12,0" RenderOptions.BitmapScalingMode="HighQuality"/>
         <StackPanel VerticalAlignment="Center">
           <TextBlock Text="Ideal Video Encoder" FontFamily="Segoe UI Variable Display, Segoe UI" FontSize="18" FontWeight="SemiBold"/>
           <TextBlock Text="HEVC and AV1, 10-bit &#x00B7; LUT and range aware" Style="{StaticResource Caption}"/>
@@ -2166,6 +2166,28 @@ $inv    = [System.Globalization.CultureInfo]::InvariantCulture
 $dot    = [string][char]0x00B7
 # mpv.net install: next to the app, the machine-wide installer location, or the per-user one
 $AppDir = if ($PSScriptRoot) { $PSScriptRoot } else { [AppDomain]::CurrentDomain.BaseDirectory }
+
+# App icon for the window, taskbar and header: assets\app.ico next to the app, else the icon ps2exe embedded in
+# the .exe. The vector AppIcon from the XAML stays as the fallback.
+try {
+    $iconSource = $null
+    $icoPath = Join-Path $AppDir 'assets\app.ico'
+    if (Test-Path -LiteralPath $icoPath) {
+        $decoder = New-Object System.Windows.Media.Imaging.IconBitmapDecoder((New-Object System.Uri $icoPath), 'None', 'OnLoad')
+        $iconSource = $decoder.Frames | Sort-Object { $_.PixelWidth } | Select-Object -Last 1
+    } else {
+        $exe = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        if ($exe -notmatch '\\(powershell|pwsh)\.exe$') {
+            $ico = [System.Drawing.Icon]::ExtractAssociatedIcon($exe)
+            $iconSource = [System.Windows.Interop.Imaging]::CreateBitmapSourceFromHIcon($ico.Handle, [System.Windows.Int32Rect]::Empty, [System.Windows.Media.Imaging.BitmapSizeOptions]::FromEmptyOptions())
+        }
+    }
+    if ($iconSource) {
+        $window.Icon = $iconSource
+        $imgAppIcon = $window.FindName('imgAppIcon')
+        if ($imgAppIcon) { $imgAppIcon.Source = $iconSource }
+    }
+} catch {}
 $MpvNetDir = @((Join-Path $AppDir 'mpv.net'), $AppDir, (Join-Path $env:ProgramFiles 'mpv.net'), (Join-Path $env:LOCALAPPDATA 'Programs\mpv.net')) |
     Where-Object { Test-Path -LiteralPath (Join-Path $_ 'libmpv-2.dll') } | Select-Object -First 1
 if (-not $MpvNetDir) { $MpvNetDir = Join-Path $env:ProgramFiles 'mpv.net' }
