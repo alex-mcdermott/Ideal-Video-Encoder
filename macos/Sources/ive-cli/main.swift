@@ -89,7 +89,7 @@ case "encode":
     let opt: RunOptions
     do { opt = try RunOptions.validate(settings: s, exposure: Double(f["ev"] ?? "0") ?? 0, trimStart: f["start"] ?? "", trimEnd: f["end"] ?? "") }
     catch { fail(error.localizedDescription) }
-    let worker = EncodeWorker(tools: tools, hasZscale: report.hasZscale)
+    let worker = EncodeWorker(tools: tools, hasZscale: report.hasZscale && f["no-zscale"] == nil)
     let task = Task {
         await worker.run(jobs: files, options: opt) { e in
             switch e {
@@ -129,7 +129,7 @@ case "analyse":
     do { opt = try RunOptions.validate(settings: s, exposure: Double(f["ev"] ?? "0") ?? 0, trimStart: "", trimEnd: "", forAnalysis: true) }
     catch { fail(error.localizedDescription) }
     opt.targetVmaf = Double(f["target"] ?? "95") ?? 95
-    let worker = AnalysisWorker(tools: tools)
+    let worker = AnalysisWorker(tools: tools, hasZscale: report.hasZscale)
     let task = Task {
         await worker.run(jobs: files, options: opt) { e in
             switch e {
@@ -156,7 +156,7 @@ case "measure":
     guard let tools = report.toolPaths else { fail("missing tools") }
     var opt = RunOptions()
     opt.codec = Codec(rawValue: f["codec"] ?? "hevc") ?? .hevc
-    let w = AnalysisWorker(tools: tools)
+    let w = AnalysisWorker(tools: tools, hasZscale: report.hasZscale)
     do {
         let (clip, _) = try await w.prepare(path: file, id: 0, options: opt)
         let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("ive-measure-\(UUID().uuidString.prefix(6))")

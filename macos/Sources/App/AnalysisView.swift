@@ -58,7 +58,7 @@ final class AnalysisModel {
         app.tab = .analysis
         app.appendLog("Analysis started: \(targets.count) clip(s), target VMAF \(target).")
 
-        let worker = AnalysisWorker(tools: tools)
+        let worker = AnalysisWorker(tools: tools, hasZscale: report.hasZscale)
         let jobs = targets.map(\.path)
         let (stream, cont) = AsyncStream<WorkerEvent>.makeStream()
         let run = Task.detached(priority: .userInitiated) {

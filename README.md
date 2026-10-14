@@ -144,16 +144,13 @@ A native Mac version lives in [`macos/`](macos/): a SwiftUI app with the same en
 ### Requirements
 
 - macOS 14 Sonoma or later, Apple silicon or Intel
-- [Homebrew](https://brew.sh) with `ffmpeg` (including `libx265`, `libsvtav1`, `zscale`, `lut3d`, `lutyuv` and, for the analyser, `libvmaf`) and `exiftool`
-
-Homebrew's standard `ffmpeg` is built without zimg, so it has no `zscale`, which full-range camera files (for example Fujifilm 4:2:2 HEVC) need. Install the `homebrew-ffmpeg` tap build instead:
+- [Homebrew](https://brew.sh) with `ffmpeg` and `exiftool`:
 
 ```sh
-brew install exiftool
-brew uninstall ffmpeg            # only if Homebrew's standard ffmpeg is installed
-brew tap homebrew-ffmpeg/ffmpeg
-brew install homebrew-ffmpeg/ffmpeg/ffmpeg --with-zimg --with-libvmaf   # builds from source, 10-30 minutes
+brew install ffmpeg exiftool
 ```
+
+Homebrew's standard `ffmpeg` has everything the app needs (`libx265`, `libsvtav1`, `lut3d`, `lutyuv` and, for the analyser, `libvmaf`). It has no `zscale`; the Windows version uses that for full-range camera files (for example Fujifilm 4:2:2 HEVC), and the Mac app uses it too when it is there, otherwise FFmpeg's built-in `scale` filter, which gives the same result to within a fraction of a level.
 
 Or let the app do it: on first launch, **Tools Setup** lists exactly what is missing, and **Install Missing Tools** runs [`macos/install-prerequisites.sh`](macos/install-prerequisites.sh) (which you can also run yourself; `--check-only` just reports). It never installs Homebrew itself. The app finds the tools in `/opt/homebrew/bin`, `/usr/local/bin` or `PATH` (apps opened from Finder don't see your shell's `PATH`), and **Settings** lets you point it at other copies.
 
@@ -183,6 +180,7 @@ Needs Xcode 16 or later. The project is generated from `macos/project.yml`. Inte
 - **Preview**: built in (AVFoundation and Core Image), no mpv needed. Exposure and the LUT are applied to encoded values like the encode; preview frames match FFmpeg's rendering to within 1/255 on average. Files macOS can't decode play from a preview copy made with FFmpeg.
 - **Settings** are stored in `~/Library/Application Support/Ideal Video Encoder/settings.json`, with the same keys as on Windows.
 - **Colour tags**: encodes add `setparams=color_primaries=bt709:color_trc=bt709`, because newer FFmpeg versions otherwise leave the primaries and transfer of untagged sources as "unknown".
+- **Full-range sources** use `zscale` when the installed FFmpeg has it (as on Windows) and FFmpeg's built-in `scale` filter otherwise, so Homebrew's standard FFmpeg is enough.
 - **Text size**: View > Bigger / Smaller (Cmd-+ / Cmd--).
 
 ## Credits

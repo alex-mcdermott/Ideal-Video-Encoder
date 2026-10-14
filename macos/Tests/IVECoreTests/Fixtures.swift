@@ -111,8 +111,12 @@ final class EventLog: @unchecked Sendable {
         for e in all.reversed() { if case .item(let p, let s, let st, _, let d) = e, p == path { return (s, st, d) } }
         return nil
     }
+    /// Output paths from the worker's "<name> -> <path> | saved ..." lines (not "source range full -> zscale ...").
     var outputs: [String] {
-        logs.compactMap { l in l.range(of: " -> ").flatMap { r in l[r.upperBound...].components(separatedBy: " | saved").first } }
+        logs.compactMap { l in
+            guard let r = l.range(of: #" -> (/.+) \| saved"#, options: .regularExpression) else { return nil }
+            return String(l[r].dropFirst(4).components(separatedBy: " | saved")[0])
+        }
     }
 }
 

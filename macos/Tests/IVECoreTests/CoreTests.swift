@@ -337,9 +337,11 @@ import Testing
         r.paths = [.ffmpeg: "/x", .ffprobe: "/y", .exiftool: "/z"]
         r.encoders = ["libx265", "libsvtav1"]
         r.filters = ["lut3d", "lutyuv", "libvmaf", "signalstats", "hqdn3d", "psnr"]
-        #expect(r.missingFilters == ["zscale"])
-        #expect(r.problems.map(\.title) == ["FFmpeg lacks zscale"])
-        #expect(r.problems[0].fix.contains("--with-zimg"))
+        // zscale is optional (Homebrew's standard FFmpeg lacks it; the built-in scale filter is used instead)
+        #expect(r.missingFilters.isEmpty && r.problems.isEmpty && r.isComplete && !r.hasZscale)
+        r.filters.remove("libvmaf")
+        #expect(r.problems.map(\.title) == ["FFmpeg lacks libvmaf"])
+        #expect(r.problems[0].fix.contains("--with-libvmaf"))
     }
 
     @Test func locatorOverride() {

@@ -56,7 +56,9 @@ public enum ToolLocator {
 /// What the installed tools can do, and what to tell the user when something is missing.
 public struct ToolReport: Sendable, Equatable {
     public static let requiredEncoders = ["libx265", "libsvtav1"]
-    public static let requiredFilters = ["zscale", "lut3d", "lutyuv", "libvmaf"]
+    public static let requiredFilters = ["lut3d", "lutyuv", "libvmaf"]
+    /// Used when present (as on Windows); without it full-range clips use the built-in scale filter.
+    public static let optionalFilters = ["zscale"]
     /// Used by Auto CRF / Auto grain; present in every normal build, checked anyway.
     public static let otherFilters = ["signalstats", "hqdn3d", "psnr"]
 
@@ -98,7 +100,7 @@ public struct ToolReport: Sendable, Equatable {
         if missingTools.contains(.ffmpeg) || missingTools.contains(.ffprobe) {
             out.append(.init(title: "FFmpeg not found",
                              explanation: "ffmpeg and ffprobe do the decoding, filtering and encoding. They were not found in /opt/homebrew/bin, /usr/local/bin or PATH.",
-                             fix: "brew install ffmpeg\n\nThen read the zscale note that follows, or set the paths in Settings."))
+                             fix: "brew install ffmpeg\n\nOr set the paths in Settings."))
         }
         if missingTools.contains(.exiftool) {
             out.append(.init(title: "ExifTool not found",
@@ -111,17 +113,12 @@ public struct ToolReport: Sendable, Equatable {
                              fix: Self.tapFix))
         }
         let f = missingFilters
-        if f.contains("zscale") {
-            out.append(.init(title: "FFmpeg lacks zscale",
-                             explanation: "zscale converts full-range camera files (for example Fujifilm 4:2:2 HEVC) to the limited range the encode needs. Homebrew's standard ffmpeg is built without zimg, so full-range clips will fail; limited-range clips still encode.",
-                             fix: Self.tapFix))
-        }
         if f.contains("libvmaf") {
             out.append(.init(title: "FFmpeg lacks libvmaf",
                              explanation: "The Analysis tab scores test encodes with VMAF. Everything else works without it.",
                              fix: Self.tapFix))
         }
-        let rest = f.filter { $0 != "zscale" && $0 != "libvmaf" }
+        let rest = f.filter { $0 != "libvmaf" }
         if !rest.isEmpty {
             out.append(.init(title: "FFmpeg lacks \(rest.joined(separator: ", "))",
                              explanation: "These filters are part of every standard FFmpeg build; this one seems unusual.",

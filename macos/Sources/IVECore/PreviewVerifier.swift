@@ -74,6 +74,38 @@ public enum PreviewVerifier {
         return ["-v", "error", "-i", path, "-vf", vf.joined(separator: ","), "-frames:v", "1", "-f", "rawvideo", "-"]
     }
 
+    /// Preview frame of `path` vs the same frame of an already-encoded file (e.g. the app's own output),
+    /// decoded by ffmpeg to RGB at the preview's size.
+    public static func compareWithEncode(path: String, index: Int, look: PreviewLook, encoded: String, ffmpeg: String) async throws -> Result {
+        let (p, w, h) = try await previewFrame(path: path, index: index, look: look)
+        let r = try await ProcessRunner.run(ffmpeg, ["-v", "error", "-i", encoded, "-vf",
+            "select=eq(n\\,\(index)),scale=\(w):\(h):in_color_matrix=bt709:out_range=pc:flags=accurate_rnd+full_chroma_int,format=rgb24",
+            "-frames:v", "1", "-f", "rawvideo", "-"])
+        guard r.exitCode == 0, r.stdout.count == p.count else {
+            throw ProcessError("ffmpeg decode failed (\(r.stdout.count) bytes, wanted \(p.count)): \(r.stderrText)")
+        }
+        return diff(p, r.stdout, w, h)
+    }
+
+    static func diff(_ p: Data, _ q: Data, _ w: Int, _ h: Int) -> Result {
+        var sums = [0.0, 0.0, 0.0], maxD = 0, over = 0, pm = 0.0, fm = 0.0
+        p.withUnsafeBytes { (a: UnsafeRawBufferPointer) in
+            q.withUnsafeBytes { (b: UnsafeRawBufferPointer) in
+                for i in 0..<a.count {
+                    let x = Int(a[i]), y = Int(b[i])
+                    let d = abs(x - y)
+                    sums[i % 3] += Double(d)
+                    if d > maxD { maxD = d }
+                    if d > 2 { over += 1 }
+                    pm += Double(x); fm += Double(y)
+                }
+            }
+        }
+        let n = Double(w * h)
+        return Result(width: w, height: h, mad: sums.map { $0 / n }, maxDiff: maxD, over2: Double(over) / (n * 3),
+                      previewMean: pm / (n * 3), ffmpegMean: fm / (n * 3))
+    }
+
     public static func compare(path: String, index: Int, look: PreviewLook, lutPath: String?, ffmpeg: String) async throws -> Result {
         let (p, w, h) = try await previewFrame(path: path, index: index, look: look)
         let r = try await ProcessRunner.run(ffmpeg, ffmpegArguments(path: path, index: index, look: look, lutPath: lutPath))

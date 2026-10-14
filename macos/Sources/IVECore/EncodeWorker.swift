@@ -89,10 +89,7 @@ public struct EncodeWorker: Sendable {
                 let isFLog2 = try await uncancellable { Metadata.isFLog2((try? await ProcessRunner.run(tools.exiftool, Metadata.userCommentArguments(file)))?.lines ?? []) }
                 let isFull = info.isFullRange
                 let heat = Heat.bar(info.complexity)
-                log("\(name): ISO \(iso.map(String.init) ?? "n/a"), F-Log2 \(isFLog2 ? "yes" : "no"), source range \(isFull ? "full -> zscale to limited" : "limited")")
-                if isFull && !hasZscale {
-                    throw ProcessError("this clip is full range and needs ffmpeg's zscale filter, which the installed ffmpeg lacks (see Tools in Settings)")
-                }
+                log("\(name): ISO \(iso.map(String.init) ?? "n/a"), F-Log2 \(isFLog2 ? "yes" : "no"), source range \(isFull ? (hasZscale ? "full -> zscale to limited" : "full -> scale to limited (no zscale in this FFmpeg)") : "limited")")
 
                 // CRF/cap/grain for this clip, in priority order:
                 //   1. Quality target: a per-clip analysis for the same target and settings, otherwise measure now
@@ -118,6 +115,7 @@ public struct EncodeWorker: Sendable {
                         }
                         var aw = AnalysisWorker(tools: tools)
                         aw.niceness = niceness
+                        aw.hasZscale = hasZscale
                         let r = try await aw.findQualityCrf(path: file, options: opt, target: target, id: index, tmp: qTmp!,
                             onTest: { label, pct in
                                 setClip(file, "Measuring (\(label))", .active, pct, "Finding the CRF for VMAF \(opt.qualityTarget)")
@@ -162,9 +160,10 @@ public struct EncodeWorker: Sendable {
                 if capUse > 0 { detailBase += " \(dot) cap \(Fmt.num(capUse)) Mbps" }
                 if opt.exposure != 0 { detailBase += " \(dot) \(opt.exposureText) EV" }
 
-                let cmd = EncodeCommand(source: file, output: out, codec: opt.codec, crf: crf, grain: grain, cap: capUse,
+                var cmd = EncodeCommand(source: file, output: out, codec: opt.codec, crf: crf, grain: grain, cap: capUse,
                                         exposure: opt.exposure, lutPath: opt.lutPath, isFullRange: isFull,
                                         width: info.width, height: info.height, trimStart: opt.trimStart, trimEnd: opt.trimEnd)
+                cmd.useZscale = hasZscale
                 if !cmd.filters.isEmpty { log("\(name): filters \(cmd.filters.joined(separator: ","))") }   // the script's chain; BT.709 tagging is appended
 
                 // Remove an existing output so ffmpeg/ExifTool start clean

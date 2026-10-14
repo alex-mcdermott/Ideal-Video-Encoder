@@ -91,6 +91,17 @@ struct GoldenArgsTests {
         #expect(FilterChain.filters(exposure: ev, lutPath: nil, isFullRange: false) == [expected])
     }
 
+    @Test func builtInScaleFallback() {
+        // macOS addition: without zscale the same step uses FFmpeg's built-in scale filter
+        #expect(FilterChain.filters(exposure: 0.5, lutPath: "/l.cube", isFullRange: true, zscale: false) ==
+                ["lutyuv=y=val+0.0369*(maxval-minval)", "format=gbrp10le", "lut3d=file='/l.cube'", "scale=in_range=pc:out_range=tv:out_color_matrix=bt709"])
+        var cmd = EncodeCommand(source: src, output: out, codec: .hevc, crf: 21, grain: .off, cap: 0, exposure: 0,
+                                lutPath: nil, isFullRange: true, width: 1920, height: 1080)
+        #expect(cmd.arguments.contains("zscale=rangein=full:range=limited:matrix=709," + tag))
+        cmd.useZscale = false
+        #expect(cmd.arguments.contains("scale=in_range=pc:out_range=tv:out_color_matrix=bt709," + tag))
+    }
+
     @Test func zeroExposureOmitted() {
         #expect(FilterChain.filters(exposure: 0, lutPath: nil, isFullRange: false).isEmpty)
         #expect(FilterChain.filters(exposure: 0.004, lutPath: "", isFullRange: false).isEmpty)

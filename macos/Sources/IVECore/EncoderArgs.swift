@@ -40,7 +40,13 @@ public enum FilterChain {
         return "lutyuv=y=val\(ev < 0 ? "-" : "+")\(k)*(maxval-minval)"
     }
 
-    public static func filters(exposure: Double, lutPath: String?, isFullRange: Bool) -> [String] {
+    /// The script's full-to-limited step (needs zimg).
+    public static let zscaleRange = "zscale=rangein=full:range=limited:matrix=709"
+    /// macOS addition: the same conversion with FFmpeg's built-in scale filter, used when the installed FFmpeg has
+    /// no zscale (Homebrew's standard build). Measured against zscale: mean difference 0.2-1.7 of 1023 code values.
+    public static let scaleRange = "scale=in_range=pc:out_range=tv:out_color_matrix=bt709"
+
+    public static func filters(exposure: Double, lutPath: String?, isFullRange: Bool, zscale: Bool = true) -> [String] {
         var vf: [String] = []
         let ev = Fmt.round(exposure, 2)
         if ev != 0 { vf.append(exposureFilter(ev)) }
@@ -48,7 +54,7 @@ public enum FilterChain {
             vf.append("format=gbrp10le")
             vf.append("lut3d=file=" + lavfiPath(lut))
         }
-        if isFullRange { vf.append("zscale=rangein=full:range=limited:matrix=709") }
+        if isFullRange { vf.append(zscale ? zscaleRange : scaleRange) }
         return vf
     }
 }
@@ -99,6 +105,8 @@ public struct EncodeCommand: Sendable, Equatable {
     public var height: Int
     public var trimStart: Double?
     public var trimEnd: Double?
+    /// Range conversion with zscale (as on Windows) or, when FFmpeg lacks it, the built-in scale filter.
+    public var useZscale = true
 
     public init(source: String, output: String, codec: Codec, crf: Int, grain: Grain, cap: Double, exposure: Double,
                 lutPath: String?, isFullRange: Bool, width: Int, height: Int, trimStart: Double? = nil, trimEnd: Double? = nil) {
@@ -108,7 +116,7 @@ public struct EncodeCommand: Sendable, Equatable {
     }
 
     /// The script's filter chain (exposure -> LUT -> range).
-    public var filters: [String] { FilterChain.filters(exposure: exposure, lutPath: lutPath, isFullRange: isFullRange) }
+    public var filters: [String] { FilterChain.filters(exposure: exposure, lutPath: lutPath, isFullRange: isFullRange, zscale: useZscale) }
 
     /// macOS addition: FFmpeg 7.1+ takes colour primaries/transfer from the frames and ignores
     /// `-color_primaries`/`-color_trc` when the source is untagged, so the output would say "unknown".

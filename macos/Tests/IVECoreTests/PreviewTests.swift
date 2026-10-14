@@ -90,4 +90,27 @@ struct PreviewFidelityTests {
         print(String(format: "control (wrong rule, full range +2 EV): MAD %.3f/255", r.overall))
         #expect(r.overall > 2)
     }
+
+    /// "Full-range sources must look the same as the encode": the preview of a full-range clip vs the app's own
+    /// encode of it (needs zscale), with and without exposure and a LUT.
+    @Test(arguments: [(0.0, false, true), (1.0, false, true), (0.0, true, true), (-1.0, true, true),
+                      (0.0, false, false), (1.0, false, false), (0.0, true, false), (-1.0, true, false)])
+    func fullRangePreviewMatchesEncode(ev: Double, withLut: Bool, useZscale: Bool) async throws {
+        let report = await ToolReport.check(settings: AppSettings())
+        if useZscale && !report.hasZscale { print("skipped: ffmpeg has no zscale"); return }
+        let src = try await Self.clip("pc")
+        let lutURL = try await Fixtures.shared.lut(named: "preview test.cube")
+        let out = try await Fixtures.shared.scratch("pv-enc")
+        var o = baseOptions(crf: 8, outDir: out)
+        o.exposure = ev
+        if withLut { o.lutPath = lutURL.path }
+        let events = EventLog()
+        await EncodeWorker(tools: Fixtures.shared.tools, hasZscale: useZscale).run(jobs: [src.path], options: o) { events.add($0) }
+        let encoded = try #require(events.outputs.first, "\(events.logs)")
+        let look = PreviewLook(exposure: ev, isFullRange: true, lut: withLut ? try CubeLUT.load(lutURL.path) : nil)
+        let r = try await PreviewVerifier.compareWithEncode(path: src.path, index: 12, look: look, encoded: encoded, ffmpeg: Fixtures.shared.tools.ffmpeg)
+        print(String(format: "full-range preview vs encode (%@) ev=%+.0f lut=%@: MAD %.3f/255 max %d, means %.2f vs %.2f",
+                     useZscale ? "zscale" : "scale", ev, withLut ? "yes" : "no", r.overall, r.maxDiff, r.previewMean, r.ffmpegMean))
+        #expect(r.overall < 2)
+    }
 }

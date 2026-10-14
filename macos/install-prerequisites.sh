@@ -4,9 +4,10 @@
 # Copyright (C) 2026 the Ideal Video Encoder contributors
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# Installs what the app needs with Homebrew: ffmpeg (with libx265, libsvtav1, zscale, lut3d, lutyuv,
-# libvmaf) and exiftool. Idempotent: tools that are present and complete are left alone.
-# Never installs Homebrew itself.
+# Installs what the app needs with Homebrew: ffmpeg (with libx265, libsvtav1, lut3d, lutyuv, libvmaf) and
+# exiftool. Homebrew's standard ffmpeg has all of these. zscale is optional: the app uses it when present (as
+# the Windows version does) and FFmpeg's built-in scale filter otherwise. Idempotent: tools that are present
+# and complete are left alone. Never installs Homebrew itself.
 #
 # Usage: install-prerequisites.sh [--check-only]
 # Exit codes: 0 everything required is present; 1 something is still missing;
@@ -29,7 +30,7 @@ for arg in "$@"; do
 done
 
 REQUIRED_ENCODERS="libx265 libsvtav1"
-REQUIRED_FILTERS="zscale lut3d lutyuv libvmaf"
+REQUIRED_FILTERS="lut3d lutyuv libvmaf"
 TAP="homebrew-ffmpeg/ffmpeg"
 TAP_FORMULA="homebrew-ffmpeg/ffmpeg/ffmpeg"
 TAP_OPTIONS="--with-zimg --with-libvmaf"
@@ -63,7 +64,7 @@ check() {
   FFMPEG=$(find_tool ffmpeg "${IVE_FFMPEG:-}")
   FFPROBE=$(find_tool ffprobe "${IVE_FFPROBE:-}")
   EXIFTOOL=$(find_tool exiftool "${IVE_EXIFTOOL:-}")
-  MISSING_COMPONENTS=
+  MISSING_COMPONENTS= HAS_ZSCALE=
   if [ -n "$FFMPEG" ]; then
     local enc fil n
     # Names are the second column after the "------" separator line
@@ -72,6 +73,7 @@ check() {
     for n in $REQUIRED_ENCODERS; do printf '%s\n' "$enc" | grep -qx "$n" || MISSING_COMPONENTS="$MISSING_COMPONENTS $n"; done
     for n in $REQUIRED_FILTERS;  do printf '%s\n' "$fil" | grep -qx "$n" || MISSING_COMPONENTS="$MISSING_COMPONENTS $n"; done
     MISSING_COMPONENTS=${MISSING_COMPONENTS# }
+    printf '%s\n' "$fil" | grep -qx zscale && HAS_ZSCALE=1
   fi
 }
 
@@ -82,6 +84,8 @@ report() {
   if [ -n "$FFMPEG" ]; then
     if [ -n "$MISSING_COMPONENTS" ]; then say "ffmpeg components missing: $MISSING_COMPONENTS"
     else say "ffmpeg components: all present ($REQUIRED_ENCODERS $REQUIRED_FILTERS)"; fi
+    if [ -n "$HAS_ZSCALE" ]; then say "zscale:   present (full-range clips are converted as on Windows)"
+    else say "zscale:   not present (optional; full-range clips use FFmpeg's built-in scale filter)"; fi
   fi
 }
 
@@ -105,15 +109,16 @@ if [ -z "$BREW" ]; then
   exit 2
 fi
 say "Homebrew: $BREW"
-export HOMEBREW_NO_ENV_HINTS=1 NONINTERACTIVE=1
+# NO_AUTOREMOVE: replacing ffmpeg must not uninstall and reinstall the libraries it uses
+export HOMEBREW_NO_ENV_HINTS=1 HOMEBREW_NO_AUTOREMOVE=1 NONINTERACTIVE=1
 
 if [ -z "$EXIFTOOL" ]; then
   step "Installing exiftool"
   "$BREW" install exiftool || say "brew install exiftool failed."
 fi
 
-# ffmpeg: Homebrew's standard formula has no zscale (no zimg), so a missing or incomplete
-# Homebrew ffmpeg is replaced with the homebrew-ffmpeg tap build, which has the options we need.
+# ffmpeg: Homebrew's standard bottle has everything required. Only if an ffmpeg Homebrew manages lacks a
+# required component is it replaced with the homebrew-ffmpeg tap build, which compiles from source.
 brew_owns_ffmpeg() {
   [ -z "$FFMPEG" ] && return 0
   local prefix; prefix=$("$BREW" --prefix 2>/dev/null)
@@ -121,7 +126,13 @@ brew_owns_ffmpeg() {
   return 1
 }
 
-if [ -z "$FFMPEG" ] || [ -z "$FFPROBE" ] || [ -n "$MISSING_COMPONENTS" ]; then
+if [ -z "$FFMPEG" ] || [ -z "$FFPROBE" ]; then
+  step "Installing ffmpeg"
+  "$BREW" install ffmpeg || say "brew install ffmpeg failed."
+  check
+fi
+
+if [ -n "$FFMPEG" ] && [ -n "$MISSING_COMPONENTS" ]; then
   if ! brew_owns_ffmpeg; then
     say ""
     say "The ffmpeg at $FFMPEG is not managed by Homebrew and lacks: ${MISSING_COMPONENTS:-ffprobe}."
@@ -130,9 +141,7 @@ if [ -z "$FFMPEG" ] || [ -z "$FFPROBE" ] || [ -n "$MISSING_COMPONENTS" ]; then
     exit 3
   fi
   step "Installing ffmpeg with all components"
-  if [ -n "$MISSING_COMPONENTS" ]; then
-    say "Homebrew's standard ffmpeg lacks: $MISSING_COMPONENTS."
-  fi
+  say "This ffmpeg lacks: $MISSING_COMPONENTS."
   say "Installing the $TAP tap build ($TAP_OPTIONS). It compiles from source; this can take 10-30 minutes."
   if "$BREW" list --formula ffmpeg >/dev/null 2>&1; then
     # Other formulae may depend on ffmpeg; the tap build provides the same libraries

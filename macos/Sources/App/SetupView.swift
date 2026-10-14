@@ -47,7 +47,7 @@ struct SetupView: View {
                                 .accessibilityHidden(true)
                             Text("components").fontWeight(.medium)
                             Text(r.missingEncoders.isEmpty && r.missingFilters.isEmpty
-                                 ? "libx265, libsvtav1, zscale, lut3d, lutyuv, libvmaf"
+                                 ? "libx265, libsvtav1, lut3d, lutyuv, libvmaf" + (r.hasZscale ? ", zscale" : " (zscale not present: the built-in scale filter is used)")
                                  : "missing: " + (r.missingEncoders + r.missingFilters).joined(separator: ", "))
                                 .foregroundStyle(.secondary)
                         }

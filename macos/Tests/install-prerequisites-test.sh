@@ -13,6 +13,8 @@ trap 'rm -rf "$ROOT"' EXIT
 PASS=0 FAIL=0
 ALL="libx265 libsvtav1 zscale lut3d lutyuv libvmaf"
 NO_ZSCALE="libx265 libsvtav1 lut3d lutyuv libvmaf"
+NO_VMAF="libx265 libsvtav1 lut3d lutyuv zscale"
+STD=$NO_ZSCALE   # what the fake "brew install ffmpeg" (Homebrew's standard bottle) provides
 
 # A fake ffmpeg whose -encoders/-filters listings contain the names in its sibling .components file
 make_ffmpeg() { # dir components...
@@ -47,6 +49,7 @@ case "\$1" in
     [ "$fail" = fail ] && exit 1
     case "\$2" in
       exiftool) make_exiftool "$prefix/bin" ;;
+      ffmpeg) make_ffmpeg "$prefix/bin" $STD; touch "$prefix/core-ffmpeg" ;;
       homebrew-ffmpeg/ffmpeg/ffmpeg) [ "\$3 \$4" = "--with-zimg --with-libvmaf" ] || exit 1
         make_ffmpeg "$prefix/bin" $ALL ;;
     esac ;;
@@ -78,23 +81,32 @@ export IVE_SEARCH_PATH="$T/empty" IVE_BREW="$T/no-such-brew"
 run "no Homebrew -> exit 2" 2
 expect "no Homebrew -> shows official install command" contains "$OUT" 'raw.githubusercontent.com/Homebrew/install/HEAD/install.sh'
 
-# 2. Nothing installed: exiftool from Homebrew, ffmpeg from the tap with the right options
+# 2. Nothing installed: exiftool and Homebrew's standard ffmpeg (no source build; zscale is optional)
 reset fresh
 make_brew "$T/brew"
 export IVE_SEARCH_PATH="$T/brew/bin" IVE_BREW="$T/brew/bin/brew"
 run "fresh -> installs and exits 0" 0
 expect "fresh -> brew install exiftool" grep -qx "install exiftool" "$T/brew/brew.log"
-expect "fresh -> tap + install with options" grep -qx "install homebrew-ffmpeg/ffmpeg/ffmpeg --with-zimg --with-libvmaf" "$T/brew/brew.log"
-expect "fresh -> nothing uninstalled" bash -c "! grep -q uninstall '$T/brew/brew.log'"
+expect "fresh -> brew install ffmpeg (the standard bottle)" grep -qx "install ffmpeg" "$T/brew/brew.log"
+expect "fresh -> no tap, no source build" bash -c "! grep -qE 'tap|homebrew-ffmpeg' '$T/brew/brew.log'"
+expect "fresh -> says zscale is optional" contains "$OUT" "zscale:   not present (optional"
 
-# 3. Homebrew core ffmpeg without zscale: replace with the tap build, leave exiftool alone
+# 3a. Homebrew's standard ffmpeg (no zscale): complete, nothing to do
 reset core
 make_brew "$T/brew"; make_ffmpeg "$T/brew/bin" $NO_ZSCALE; touch "$T/brew/core-ffmpeg"; make_exiftool "$T/brew/bin"
 export IVE_SEARCH_PATH="$T/brew/bin" IVE_BREW="$T/brew/bin/brew"
-run "core ffmpeg lacks zscale -> exit 0" 0
-expect "core -> explains what is missing" contains "$OUT" "Homebrew's standard ffmpeg lacks: zscale"
-expect "core -> uninstall --ignore-dependencies" grep -qx "uninstall --ignore-dependencies ffmpeg" "$T/brew/brew.log"
-expect "core -> exiftool not reinstalled" bash -c "! grep -q 'install exiftool' '$T/brew/brew.log'"
+run "standard ffmpeg without zscale -> exit 0" 0
+expect "standard ffmpeg -> brew never called" test ! -s "$T/brew/brew.log"
+
+# 3b. A Homebrew ffmpeg lacking a required component (libvmaf): replaced with the tap build
+reset novmaf
+make_brew "$T/brew"; make_ffmpeg "$T/brew/bin" $NO_VMAF; touch "$T/brew/core-ffmpeg"; make_exiftool "$T/brew/bin"
+export IVE_SEARCH_PATH="$T/brew/bin" IVE_BREW="$T/brew/bin/brew"
+run "ffmpeg lacks libvmaf -> exit 0" 0
+expect "lacks libvmaf -> explains what is missing" contains "$OUT" "This ffmpeg lacks: libvmaf"
+expect "lacks libvmaf -> uninstall --ignore-dependencies" grep -qx "uninstall --ignore-dependencies ffmpeg" "$T/brew/brew.log"
+expect "lacks libvmaf -> tap build with options" grep -qx "install homebrew-ffmpeg/ffmpeg/ffmpeg --with-zimg --with-libvmaf" "$T/brew/brew.log"
+expect "lacks libvmaf -> exiftool not reinstalled" bash -c "! grep -q 'install exiftool' '$T/brew/brew.log'"
 
 # 4. Everything present: no brew calls at all (idempotent)
 reset complete
@@ -106,15 +118,15 @@ expect "complete -> brew never called" test ! -s "$T/brew/brew.log"
 
 # 5. --check-only with things missing: report, change nothing
 reset checkonly
-make_brew "$T/brew"; make_ffmpeg "$T/brew/bin" $NO_ZSCALE
+make_brew "$T/brew"; make_ffmpeg "$T/brew/bin" $NO_VMAF
 export IVE_SEARCH_PATH="$T/brew/bin" IVE_BREW="$T/brew/bin/brew"
 run "--check-only, missing -> exit 1" 1 --check-only
-expect "--check-only -> lists missing exiftool and zscale" bash -c "printf '%s' \"\$0\" | grep -q 'exiftool: MISSING' && printf '%s' \"\$0\" | grep -q 'components missing: zscale'" "$OUT"
+expect "--check-only -> lists missing exiftool and libvmaf" bash -c "printf '%s' \"\$0\" | grep -q 'exiftool: MISSING' && printf '%s' \"\$0\" | grep -q 'components missing: libvmaf'" "$OUT"
 expect "--check-only -> brew never called" test ! -s "$T/brew/brew.log"
 
 # 6. An ffmpeg outside Homebrew that lacks components is left alone
 reset foreign
-make_brew "$T/brew"; make_ffmpeg "$T/other" $NO_ZSCALE; make_exiftool "$T/other"
+make_brew "$T/brew"; make_ffmpeg "$T/other" $NO_VMAF; make_exiftool "$T/other"
 export IVE_SEARCH_PATH="$T/other" IVE_BREW="$T/brew/bin/brew"
 run "non-Homebrew ffmpeg -> exit 3" 3
 expect "non-Homebrew ffmpeg -> not touched" bash -c "! grep -qE 'uninstall|install' '$T/brew/brew.log'"

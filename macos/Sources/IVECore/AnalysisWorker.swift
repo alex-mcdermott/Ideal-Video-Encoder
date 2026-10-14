@@ -90,8 +90,10 @@ public struct AnalysisWorker: Sendable {
     /// Where the temporary sample folder goes (tests point it somewhere they can inspect).
     public var tempRoot = FileManager.default.temporaryDirectory
     public var niceness: Int32 = 10
+    /// Range conversion for full-range clips: zscale when FFmpeg has it, else the built-in scale filter.
+    public var hasZscale = true
 
-    public init(tools: ToolPaths) { self.tools = tools }
+    public init(tools: ToolPaths, hasZscale: Bool = true) { self.tools = tools; self.hasZscale = hasZscale }
 
     // MARK: building blocks (also used by the sanity tests)
 
@@ -189,7 +191,7 @@ public struct AnalysisWorker: Sendable {
             grain = AutoRules.analysisGrain(manual: opt.grain, auto: true, isFLog2: flog, iso: iso)
         }
         let s = AnalysisClip.samples(duration: info.duration)
-        let vf = FilterChain.filters(exposure: opt.exposure, lutPath: opt.lutPath, isFullRange: info.isFullRange)
+        let vf = FilterChain.filters(exposure: opt.exposure, lutPath: opt.lutPath, isFullRange: info.isFullRange, zscale: hasZscale)
         // A LUT leaves RGB; convert the reference the way the encoder does (BT.709, limited)
         let refTail = (opt.lutPath?.isEmpty ?? true) ? [] : ["scale=out_color_matrix=bt709:out_range=tv"]
         return (AnalysisClip(id: id, path: path, starts: s.starts, segLen: s.segLen, vf: vf, refTail: refTail, grain: grain,

@@ -131,19 +131,19 @@ struct EncodeIntegrationTests {
         #expect(p.v["width"] as? Int == 6240 && p.v["height"] as? Int == 4160)
     }
 
-    @Test func fullRangeSource() async throws {
+    /// Full-range source with zscale (when FFmpeg has it) and with the built-in scale fallback.
+    @Test(arguments: [true, false])
+    func fullRangeSource(useZscale: Bool) async throws {
+        if useZscale, !(await hasZscale()) { print("skipped: ffmpeg has no zscale"); return }
         let src = try await fx.clip("full422.mov", seconds: 1, fullRange: true)
         let out = try await fx.scratch("full")
-        let ev = await encode([src], baseOptions(outDir: out))
-        if await hasZscale() {
-            let p = try await Probed.load(try #require(ev.outputs.first), tools: tools)
-            #expect(p.s("color_range") == "tv")
-        } else {
-            // Without zscale the clip must fail with a clear reason, not an ffmpeg error dump
-            #expect(ev.finished?.failed == 1)
-            #expect(ev.logs.contains { $0.contains("FAILED") && $0.contains("zscale") })
-            #expect(try FileManager.default.contentsOfDirectory(atPath: out.path).isEmpty)
-        }
+        let w = EncodeWorker(tools: tools, hasZscale: useZscale)
+        let ev = EventLog()
+        await w.run(jobs: [src.path], options: baseOptions(outDir: out)) { ev.add($0) }
+        #expect(ev.finished?.ok == 1, "\(ev.logs)")
+        #expect(ev.logs.contains { $0.contains(useZscale ? "source range full -> zscale to limited" : "source range full -> scale to limited") })
+        let p = try await Probed.load(try #require(ev.outputs.first), tools: tools)
+        #expect(p.s("color_range") == "tv" && p.s("pix_fmt") == "yuv420p10le" && p.s("color_primaries") == "bt709")
     }
 
     @Test func lutAndExposureApplied() async throws {
@@ -287,6 +287,28 @@ struct EncodeIntegrationTests {
         print("levels lut=\(withLut): source avg \(f(ref.avg)) min \(f(ref.min)) max \(f(ref.max)) p0.1 \(f(ref.lo)) p99.9 \(f(ref.hi)) | encode avg \(f(enc.avg)) min \(f(enc.min)) max \(f(enc.max)) p0.1 \(f(enc.lo)) p99.9 \(f(enc.hi))")
         #expect(abs(ref.avg - enc.avg) < 2)
         #expect(abs(ref.p1 - enc.p1) < 2 && abs(ref.p99 - enc.p99) < 2)
+        #expect(abs(ref.lo - enc.lo) < 2 && abs(ref.hi - enc.hi) < 2)
+    }
+
+    /// Full-range source (needs zscale): the encode, decoded to RGB, must match the source's own RGB picture
+    /// (through the look, but WITHOUT zscale, so a range mistake in the encode chain can't hide on both sides).
+    @Test(arguments: [false, true], [true, false])
+    func fullRangeLevelsMatch(withLut: Bool, useZscale: Bool) async throws {
+        if useZscale, !(await hasZscale()) { print("skipped: ffmpeg has no zscale"); return }
+        let src = try await fx.clip("full422.mov", seconds: 3, fullRange: true)
+        let out = try await fx.scratch("fulllevels")
+        var o = baseOptions(crf: 16, outDir: out)
+        if withLut { o.lutPath = try await fx.lut().path }
+        let ev = EventLog()
+        await EncodeWorker(tools: tools, hasZscale: useZscale).run(jobs: [src.path], options: o) { ev.add($0) }
+        let path = try #require(ev.outputs.first, "\(ev.logs)")
+        #expect(try await Probed.load(path, tools: tools).s("color_range") == "tv")
+        let lookOnly = FilterChain.filters(exposure: 0, lutPath: o.lutPath, isFullRange: false)   // no zscale
+        let ref = try await lumaStats(src.path, filters: lookOnly)
+        let enc = try await lumaStats(path, filters: [])
+        func f(_ x: Double) -> String { String(format: "%.2f", x) }
+        print("full-range levels lut=\(withLut) \(useZscale ? "zscale" : "scale "): source avg \(f(ref.avg)) min \(f(ref.min)) max \(f(ref.max)) p0.1 \(f(ref.lo)) p99.9 \(f(ref.hi)) | encode avg \(f(enc.avg)) min \(f(enc.min)) max \(f(enc.max)) p0.1 \(f(enc.lo)) p99.9 \(f(enc.hi))")
+        #expect(abs(ref.avg - enc.avg) < 2)
         #expect(abs(ref.lo - enc.lo) < 2 && abs(ref.hi - enc.hi) < 2)
     }
 }
