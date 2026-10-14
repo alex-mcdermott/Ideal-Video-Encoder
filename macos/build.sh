@@ -6,7 +6,7 @@
 #
 # Builds "Ideal Video Encoder.app" (Release, Apple Silicon + Intel), signs it ad hoc and zips it into dist/.
 # Needs Xcode and XcodeGen (brew install xcodegen). Usage: ./build.sh [--icon] [--test]
-#   --icon  regenerate Resources/AppIcon.icns from ../assets/app.ico first
+#   --icon  regenerate Resources/AppIcon.icns and ../assets/app.ico from ../assets/app-icon-source.jpg first
 #   --test  run the unit tests before building
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -27,7 +27,7 @@ xcodebuild -version >/dev/null 2>&1 || { echo "Full Xcode is needed (xcode-selec
 
 if [ "${ICON:-0}" = 1 ]; then
   T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-  swift Scripts/make-icon.swift ../assets/app.ico "$T/AppIcon.iconset" macos-grid
+  swift Scripts/make-icon.swift ../assets/app-icon-source.jpg "$T/AppIcon.iconset" ../assets/app.ico
   iconutil -c icns "$T/AppIcon.iconset" -o Resources/AppIcon.icns
 fi
 
