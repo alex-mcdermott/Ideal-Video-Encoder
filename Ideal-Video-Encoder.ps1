@@ -381,6 +381,55 @@ $CoreScript = {
         return $result
     }
 
+    # ---- Speed and audio ----
+    # Source frame rate as a rational, e.g. @(30000, 1001)
+    function Get-FrameRate([string]$path) {
+        $r = (Invoke-Hidden 'ffprobe' @('-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=r_frame_rate', '-of', 'csv=p=0', $path) | Select-Object -First 1)
+        if ($r -match '^(\d+)/(\d+)$' -and [int]$matches[2] -gt 0) { return @([double]$matches[1], [double]$matches[2]) }
+        return @(30.0, 1.0)
+    }
+
+    # Video filters for a speed change. Slowing down high-frame-rate footage conforms it (120 fps at 0.25x plays as
+    # smooth 30 fps); otherwise the source frame rate is kept (frames repeat when slowed, drop when sped up).
+    function Get-SpeedFilters([double]$speed, [string]$path) {
+        if ([math]::Abs($speed - 1) -lt 0.0001) { return , @() }
+        $inv = [System.Globalization.CultureInfo]::InvariantCulture
+        $fr = Get-FrameRate $path
+        $rate = "{0}/{1}" -f $fr[0].ToString($inv), $fr[1].ToString($inv)
+        if ($speed -lt 1 -and ($fr[0] * $speed / $fr[1]) -ge 23.9) { $rate = "{0}/{1}" -f ($fr[0] * $speed).ToString('0.###', $inv), $fr[1].ToString($inv) }
+        return , @(("setpts=PTS/{0}" -f $speed.ToString($inv)), "fps=fps=$rate")
+    }
+
+    # Pitch-preserving tempo change; atempo takes 0.5-100 per instance, so chain it for slower speeds
+    function Get-AtempoFilters([double]$speed) {
+        if ([math]::Abs($speed - 1) -lt 0.0001) { return , @() }
+        $inv = [System.Globalization.CultureInfo]::InvariantCulture
+        $f = @(); $s = $speed
+        while ($s -lt 0.5) { $f += 'atempo=0.5'; $s = $s / 0.5 }
+        if ([math]::Abs($s - 1) -gt 0.0001) { $f += 'atempo=' + $s.ToString($inv) }
+        return , $f
+    }
+
+    function Test-HasAudio([string]$path) {
+        return [bool](Invoke-Hidden 'ffprobe' @('-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=index', '-of', 'csv=p=0', $path))
+    }
+
+    # EBU R128 loudness target used by "Normalise loudness"
+    $LoudnormTarget = 'I=-16:TP=-1.5:LRA=11'
+
+    # First loudnorm pass: measure the audio exactly as it will be encoded; returns the second-pass filter
+    function Get-LoudnormFilter([string[]]$inputArgs, [string]$map, [string[]]$pre, [double]$duration, $Sync) {
+        $af = @($pre) + "loudnorm=$($LoudnormTarget):print_format=json"
+        $a = @('-hide_banner', '-nostdin') + $inputArgs + @('-map', $map, '-vn', '-af', ($af -join ','))
+        if ($duration -gt 0) { $a += '-t', (Format-Num $duration '0.###') }
+        $a += '-f', 'null', '-'
+        $err = Invoke-FfmpegChecked $a $Sync
+        $json = [regex]::Match($err, '\{[^{}]*"input_i"[^{}]*\}', 'Singleline').Value
+        if (-not $json) { throw 'loudness measurement failed' }
+        $m = $json | ConvertFrom-Json
+        return "loudnorm=$($LoudnormTarget):measured_I=$($m.input_i):measured_TP=$($m.input_tp):measured_LRA=$($m.input_lra):measured_thresh=$($m.input_thresh):offset=$($m.target_offset):linear=true"
+    }
+
     # ---- Quality search (shared by the Analysis tab and the "Quality target" encode mode) ----
     function Format-Num([double]$v, [string]$f = '0.0') { $v.ToString($f, [System.Globalization.CultureInfo]::InvariantCulture) }
 
@@ -468,6 +517,7 @@ $CoreScript = {
         $segLen = [math]::Min(3.0, [math]::Max(0.5, $dur - 0.1))
         $starts = if ($dur -le 20) { @([math]::Max(0, ($dur - $segLen) / 2)) } else { @(($dur * 0.3 - $segLen / 2), ($dur * 0.7 - $segLen / 2)) }
         $vf = Get-FilterChain -Exposure $Opt.Exposure -LutPath $Opt.LutPath -IsFull $isFull
+        if ($Opt.Speed) { $vf += Get-SpeedFilters ([double]$Opt.Speed) $file }
         # A LUT leaves RGB; convert the reference the way the encoder does (BT.709, limited)
         $refTail = if ($Opt.LutPath) { @('scale=out_color_matrix=bt709:out_range=tv') } else { @() }
         $clip = @{ Id = $Id; Path = $file; Starts = $starts; SegLen = $segLen; Vf = $vf; RefTail = $refTail; Grain = $grain; W = [int]$info['width']; H = [int]$info['height'] }
@@ -681,17 +731,62 @@ $WorkerScript = {
             if ($capUse -gt 0) { $detailBase += " $dot cap $($capUse.ToString($inv)) Mbps" }
             if ($Opt.Exposure -ne 0) { $detailBase += " $dot $evText EV" }
 
-            # Build args
-            $ffArgs = @("-y", "-nostdin", "-hide_banner")
-            if ($null -ne $Opt.TrimStart) { $ffArgs += "-ss", $Opt.TrimStart.ToString($inv) }
-            if ($null -ne $Opt.TrimEnd)   { $ffArgs += "-to", $Opt.TrimEnd.ToString($inv) }
-            $ffArgs += "-i", $file
+            # Durations: source time after trim, then output time after the speed change
+            $speed = if ($Opt.Speed) { [double]$Opt.Speed } else { 1.0 }
+            $srcDur = Get-Duration $file
+            $targetDuration = $srcDur
+            if ($null -ne $Opt.TrimStart -and $null -ne $Opt.TrimEnd) { $targetDuration = $Opt.TrimEnd - $Opt.TrimStart }
+            elseif ($null -ne $Opt.TrimEnd)   { $targetDuration = $Opt.TrimEnd }
+            elseif ($null -ne $Opt.TrimStart) { $targetDuration = $srcDur - $Opt.TrimStart }
+            $outDuration = $targetDuration / $speed
+
+            # Inputs: the clip (trimmed), plus a looped music file when replacing the audio
+            $clipIn = @()
+            if ($null -ne $Opt.TrimStart) { $clipIn += "-ss", $Opt.TrimStart.ToString($inv) }
+            if ($null -ne $Opt.TrimEnd)   { $clipIn += "-to", $Opt.TrimEnd.ToString($inv) }
+            $clipIn += "-i", $file
+            $ffArgs = @("-y", "-nostdin", "-hide_banner") + $clipIn
 
             $vf = Get-FilterChain -Exposure $Opt.Exposure -LutPath $Opt.LutPath -IsFull $isFull
+            $vf += Get-SpeedFilters $speed $file
+            $vfArgs = @()   # output options, so they go after every input (the music file is one)
             if ($vf.Count -gt 0) {
-                $ffArgs += "-vf", ($vf -join ",")
+                $vfArgs = @("-vf", ($vf -join ","))
                 Log "${nameOnly}: filters $($vf -join ',')"
             }
+
+            # Audio: off, the clip's own (tempo-matched to the speed), or a music file (looped, faded out at the end);
+            # either can be loudness-normalised in two passes
+            $audioArgs = @("-an"); $audioText = 'no audio'; $map = @("-map", "0:v:0")
+            $useMusic = $Opt.AudioEnabled -and $Opt.MusicPath
+            if ($Opt.AudioEnabled -and ($useMusic -or (Test-HasAudio $file))) {
+                if ($useMusic) {
+                    $audioIn = @("-stream_loop", "-1", "-i", $Opt.MusicPath)
+                    $ffArgs += $audioIn
+                    $aMap = "1:a:0"; $pre = @(); $measureIn = $audioIn; $measureMap = "0:a:0"   # music is the only input when measuring
+                    $audioText = 'music: ' + [IO.Path]::GetFileName($Opt.MusicPath)
+                } else {
+                    $aMap = "0:a:0"; $pre = Get-AtempoFilters $speed; $measureIn = $clipIn; $measureMap = "0:a:0"
+                    $audioText = 'clip audio'
+                }
+                $af = @($pre)
+                if ($Opt.Normalize) {
+                    Set-Clip $file 'Measuring loudness' 'active' 0 $null
+                    $af += Get-LoudnormFilter $measureIn $measureMap $pre $(if ($useMusic) { $outDuration } else { 0 }) $Sync
+                    $audioText += ', normalised'
+                }
+                if ($useMusic -and $outDuration -gt 0) {
+                    $fade = [math]::Min(2.0, $outDuration / 4)
+                    $af += "afade=t=out:st={0}:d={1}" -f (Format-Num ($outDuration - $fade) '0.###'), (Format-Num $fade '0.###')
+                }
+                $map += "-map", $aMap
+                $audioArgs = @("-c:a", "aac", "-b:a", "320k", "-ar", "48000", "-ac", "2")
+                if ($af.Count) { $audioArgs += "-af", ($af -join ",") }
+                if ($useMusic) { $audioArgs += "-shortest", "-t", (Format-Num $outDuration '0.###') }
+            }
+            $ffArgs += $vfArgs + $map
+            if ($speed -ne 1) { $detailBase += " $dot $(Format-Num $speed '0.###')x" }
+            if ($audioText -ne 'clip audio') { $detailBase += " $dot $audioText" }
 
             # Remove an existing output so ffmpeg/ExifTool start clean
             if (Test-Path -LiteralPath $outPath) {
@@ -705,16 +800,12 @@ $WorkerScript = {
             # Constrained VBR when capped: CRF quality target, VBV caps peaks (buffer = 2x max rate)
             $size = Get-VideoSize $file
             $ffArgs += Get-VideoCodecArgs $Opt.Codec $crf $capUse $grain $size[0] $size[1]
-            $ffArgs += "-c:a","aac","-b:a","320k","-ar","48000","-ac","2"
+            $ffArgs += $audioArgs
             $ffArgs += "-color_primaries","bt709","-color_trc","bt709","-colorspace","bt709","-color_range","tv","-movflags","+faststart"
             $ffArgs += $outPath
 
-            # Target duration for progress
-            $srcDur = Get-Duration $file
-            $targetDuration = $srcDur
-            if ($null -ne $Opt.TrimStart -and $null -ne $Opt.TrimEnd) { $targetDuration = $Opt.TrimEnd - $Opt.TrimStart }
-            elseif ($null -ne $Opt.TrimEnd)   { $targetDuration = $Opt.TrimEnd }
-            elseif ($null -ne $Opt.TrimStart) { $targetDuration = $srcDur - $Opt.TrimStart }
+            # Progress is measured in output time
+            $targetDuration = $outDuration
 
             Set-Clip $file 'Encoding 0%' 'active' 0 $detailBase
             $proc = Start-Hidden 'ffmpeg' $ffArgs
@@ -727,8 +818,8 @@ $WorkerScript = {
                     $cur = ([int]$matches[1] * 3600) + ([int]$matches[2] * 60) + [double]$matches[3]
                     if ($targetDuration -gt 0) {
                         $pct = [math]::Min(100, ($cur / $targetDuration) * 100)
-                        $speed = if ($line -match 'speed=\s*([\d\.]+)x') { " $dot " + $matches[1] + "x" } else { '' }
-                        Set-Clip $file ("Encoding {0:0}%" -f $pct) 'active' $pct ($detailBase + $speed)
+                        $rateText = if ($line -match 'speed=\s*([\d\.]+)x') { " $dot " + $matches[1] + "x" } else { '' }
+                        Set-Clip $file ("Encoding {0:0}%" -f $pct) 'active' $pct ($detailBase + $rateText)
                         Post-Overall $pct
                     }
                 }
@@ -769,11 +860,12 @@ $WorkerScript = {
                 "-TagsFromFile",$file,
                 "-All", "-makernotes", "-make", "-model",
 
-                # Core Make/Model
-                "-Keys:Make<Make",
-                "-Keys:Model<Model",
+                # Core Make/Model. Keys (Apple's own group) must come after QuickTime:Make/Model, which would
+                # otherwise override it; with this order all of Keys, UserData and XMP get them.
                 "-QuickTime:Make<Make",
                 "-QuickTime:Model<Model",
+                "-Keys:Make<Make",
+                "-Keys:Model<Model",
 
                 # Standard Lens Data Mapping
                 "-LensModel<LensModel",
@@ -862,7 +954,7 @@ $WorkerScript = {
             $origBitrate = (Invoke-Hidden 'ffprobe' @('-v','error','-select_streams','v:0','-show_entries','stream=bit_rate','-of','default=nk=1:nw=1', $file)) -as [double]
             $ratio = 0; if ($origSizeMB -gt 0) { $ratio = [math]::Round((1 - ($newSizeMB / $origSizeMB)) * 100, 1) }
             $rangeStr = if ($isFull) { 'full' } else { 'video' }
-            $notes = "Codec=$($Opt.CodecName) ISO=$iso FLog2=$isFlog2 Range=$rangeStr EV=$evText VBV=$vbvText"
+            $notes = "Codec=$($Opt.CodecName) ISO=$iso FLog2=$isFlog2 Range=$rangeStr EV=$evText VBV=$vbvText Speed=$(Format-Num $speed '0.###')x Audio=$audioText"
             Log ("{0} -> {1} | saved {2}% ({3} -> {4} MB) | CRF={5} Grain={6} VBV={7} EV={8} | Heat {9}" -f $nameOnly, $outPath, $ratio, [math]::Round($origSizeMB, 1), [math]::Round($newSizeMB, 1), $crf, $grain, $vbvText, $evText, $heat)
             if ($Opt.CsvEnabled) {
                 try { Add-Content -Encoding UTF8 -LiteralPath $Opt.CsvPath ("`"$nameOnly`",$iso,$isFlog2,$crf,$grain,$origBitrate,$([math]::Round($origSizeMB,2)),$([math]::Round($newSizeMB,2)),$ratio,$heat,`"$notes`"") }
@@ -1914,13 +2006,68 @@ $Xaml = @'
 
             <Border Style="{StaticResource Card}" Margin="0,0,0,12">
               <StackPanel>
-                <TextBlock Text="Trim" Style="{StaticResource Section}"/>
+                <TextBlock Text="Trim and speed" Style="{StaticResource Section}"/>
                 <Grid>
                   <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                   <TextBox x:Name="txtStart" Tag="Start (s or mm:ss)"/>
                   <TextBox x:Name="txtEnd" Grid.Column="2" Tag="End (s or mm:ss)"/>
                 </Grid>
                 <TextBlock Text="Leave empty for the whole clip. The preview loops this range." Style="{StaticResource Caption}" Margin="0,8,0,0"/>
+                <Rectangle Style="{StaticResource DividerLine}"/>
+                <Grid>
+                  <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                  <StackPanel VerticalAlignment="Center">
+                    <TextBlock Text="Speed"/>
+                    <TextBlock x:Name="txtSpeedHint" Style="{StaticResource Caption}" Margin="0,2,12,0"/>
+                  </StackPanel>
+                  <ComboBox x:Name="cmbSpeed" Grid.Column="1" Width="110" VerticalAlignment="Center" ToolTip="Playback speed of the output">
+                    <ComboBoxItem Content="0.125x"/>
+                    <ComboBoxItem Content="0.25x"/>
+                    <ComboBoxItem Content="0.5x"/>
+                    <ComboBoxItem Content="0.75x"/>
+                    <ComboBoxItem Content="1x (normal)" IsSelected="True"/>
+                    <ComboBoxItem Content="1.5x"/>
+                    <ComboBoxItem Content="2x"/>
+                    <ComboBoxItem Content="4x"/>
+                    <ComboBoxItem Content="8x"/>
+                  </ComboBox>
+                </Grid>
+              </StackPanel>
+            </Border>
+
+            <Border Style="{StaticResource Card}" Margin="0,0,0,12">
+              <StackPanel>
+                <TextBlock Text="Audio" Style="{StaticResource Section}"/>
+                <CheckBox x:Name="chkAudio" Style="{StaticResource Toggle}" IsChecked="True">
+                  <StackPanel>
+                    <TextBlock Text="Include audio"/>
+                    <TextBlock Text="Off removes the soundtrack." Style="{StaticResource Caption}" Margin="0,2,0,0"/>
+                  </StackPanel>
+                </CheckBox>
+                <Rectangle Style="{StaticResource DividerLine}"/>
+                <CheckBox x:Name="chkMusic" Style="{StaticResource Toggle}">
+                  <StackPanel>
+                    <TextBlock Text="Replace with a music file"/>
+                    <TextBlock Text="Loops if shorter than the clip and fades out at the end." Style="{StaticResource Caption}" Margin="0,2,0,0"/>
+                  </StackPanel>
+                </CheckBox>
+                <Grid Margin="0,10,0,0">
+                  <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                  <Border Background="{StaticResource InputBg}" BorderBrush="{StaticResource ControlStroke}" BorderThickness="1" CornerRadius="4" Padding="10,0" Height="32">
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                      <TextBlock Text="&#xE8D6;" Style="{StaticResource Icon}" Foreground="{StaticResource Text2}" Margin="0,0,8,0"/>
+                      <TextBlock x:Name="txtMusicName" Text="No music file selected" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+                    </StackPanel>
+                  </Border>
+                  <Button x:Name="btnMusic" Grid.Column="1" Content="Browse" Margin="8,0,0,0"/>
+                </Grid>
+                <Rectangle Style="{StaticResource DividerLine}"/>
+                <CheckBox x:Name="chkNormalize" Style="{StaticResource Toggle}">
+                  <StackPanel>
+                    <TextBlock Text="Normalise loudness"/>
+                    <TextBlock Text="Two-pass EBU R128 to -16 LUFS, peaks at -1.5 dBTP." Style="{StaticResource Caption}" Margin="0,2,0,0"/>
+                  </StackPanel>
+                </CheckBox>
               </StackPanel>
             </Border>
 
@@ -2050,6 +2197,9 @@ $script:AnaItems    = New-Object 'System.Collections.ObjectModel.ObservableColle
 $script:AnaSuggest  = $null
 $script:AnaResults    = @{}   # path -> latest analysis result (not yet applied)
 $script:ClipOverrides = @{}   # path -> per-clip CRF/cap/grain chosen by analysis ("Use per clip" or a quality-target run)
+$script:MusicPath     = ''    # replacement audio for this session only (never saved, so it can't surprise a later run)
+$script:PreviewMusic  = $null # music track loaded into the preview, and the clip's own audio track id to go back to
+$script:PreviewClipAid = $null
 $lstAnalysis.ItemsSource = $script:AnaItems
 
 # ========== UI helpers ==========
@@ -2151,7 +2301,13 @@ function Update-QueueState {
 
 # Everything a measured CRF depends on; a per-clip result is only reused when this matches
 function Get-LookKey {
-    "{0}|{1}|{2}|{3}|{4}" -f (Get-Codec), ([math]::Round($sldEv.Value, 1)).ToString($inv), (Get-CurrentLut), $cmbGrain.SelectedIndex, [bool]$chkAutoGrain.IsChecked
+    "{0}|{1}|{2}|{3}|{4}|{5}" -f (Get-Codec), ([math]::Round($sldEv.Value, 1)).ToString($inv), (Get-CurrentLut), $cmbGrain.SelectedIndex, [bool]$chkAutoGrain.IsChecked, (Get-Speed).ToString($inv)
+}
+$SpeedSteps = @(0.125, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 4.0, 8.0)
+function Get-Speed { $SpeedSteps[[math]::Max(0, $cmbSpeed.SelectedIndex)] }
+function Get-CurrentMusic {
+    if ($chkAudio.IsChecked -and $chkMusic.IsChecked -and $script:MusicPath -and (Test-Path -LiteralPath $script:MusicPath)) { return $script:MusicPath }
+    return ''
 }
 function Get-QualityTarget { @(0, 93, 95, 97)[[math]::Max(0, $cmbQualityTarget.SelectedIndex)] }
 
@@ -2166,6 +2322,14 @@ function Update-OverrideNotes {
 }
 
 function Update-Enablement {
+    $sp = Get-Speed
+    $txtSpeedHint.Text = if ($sp -lt 1) { 'Slower. High-frame-rate footage plays smoothly (120 fps at 0.25x becomes 30 fps).' } elseif ($sp -gt 1) { 'Faster. Frames are dropped to keep the frame rate.' } else { 'Normal speed.' }
+    $audioOn = [bool]$chkAudio.IsChecked
+    $chkMusic.IsEnabled = $audioOn
+    $btnMusic.IsEnabled = $audioOn
+    $chkNormalize.IsEnabled = $audioOn
+    $txtMusicName.Text = if ($script:MusicPath) { [IO.Path]::GetFileName($script:MusicPath) } else { 'No music file selected' }
+    $txtMusicName.ToolTip = if ($script:MusicPath) { $script:MusicPath } else { $null }
     $target = (Get-QualityTarget) -gt 0
     $txtCrf.IsEnabled = -not $chkAutoCrf.IsChecked -and -not $target
     $chkAutoCrf.IsEnabled = -not $target
@@ -2242,7 +2406,7 @@ function Save-Settings {
         $s = [ordered]@{
             LutPath = $script:LutPath; LutEnabled = [bool]$chkLut.IsChecked
             Codec = (Get-Codec); AutoCrf = [bool]$chkAutoCrf.IsChecked; CrfHevc = $(if ((Get-Codec) -eq 'hevc') { $txtCrf.Text } else { $script:CrfByCodec.hevc }); CrfAv1 = $(if ((Get-Codec) -eq 'av1') { $txtCrf.Text } else { $script:CrfByCodec.av1 })
-            AutoGrain = [bool]$chkAutoGrain.IsChecked; GrainLevel = $cmbGrain.SelectedIndex; QualityTarget = (Get-QualityTarget); ScheduleTime = $txtStartTime.Text.Trim()
+            AutoGrain = [bool]$chkAutoGrain.IsChecked; GrainLevel = $cmbGrain.SelectedIndex; QualityTarget = (Get-QualityTarget); ScheduleTime = $txtStartTime.Text.Trim(); AudioEnabled = [bool]$chkAudio.IsChecked; NormalizeAudio = [bool]$chkNormalize.IsChecked
             VbrEnabled = [bool]$chkVbr.IsChecked; MaxRate = $txtMaxRate.Text
             OutputMode = (Get-OutputMode); OutputFolder = $txtOutFolder.Text.Trim(); Subfolder = $txtSubfolder.Text
             CsvEnabled = [bool]$chkCsv.IsChecked; CsvPath = $script:CsvPath
@@ -2272,6 +2436,8 @@ function Import-SettingsCore {
         $chkAutoGrain.IsChecked = [bool]$s.AutoGrain
         $ti = [array]::IndexOf(@(0, 93, 95, 97), [int]$s.QualityTarget); if ($ti -gt 0) { $cmbQualityTarget.SelectedIndex = $ti }
         if ($s.ScheduleTime) { $txtStartTime.Text = [string]$s.ScheduleTime }
+        if ($null -ne $s.AudioEnabled) { $chkAudio.IsChecked = [bool]$s.AudioEnabled }
+        $chkNormalize.IsChecked = [bool]$s.NormalizeAudio
         if ($null -ne $s.GrainLevel -and [int]$s.GrainLevel -ge 0 -and [int]$s.GrainLevel -le 2) { $cmbGrain.SelectedIndex = [int]$s.GrainLevel }
         $chkVbr.IsChecked = [bool]$s.VbrEnabled; if ($s.MaxRate) { $txtMaxRate.Text = $s.MaxRate }
         if ($s.OutputMode -eq 'custom') { $rbCustom.IsChecked = $true }
@@ -2378,8 +2544,26 @@ function Get-PreviewVf([string]$path) {
     return ''
 }
 
+# Preview audio: mute when audio is off, live loudness normalisation, and the music file as an external track
+function Update-PreviewAudio {
+    if (-not ($script:Mpv -and $script:Mpv.IsAlive -and $script:PreviewPath)) { return }
+    [void]$script:Mpv.SetProperty('mute', $(if ($chkAudio.IsChecked) { 'no' } else { 'yes' }))
+    [void]$script:Mpv.SetProperty('af', $(if ($chkAudio.IsChecked -and $chkNormalize.IsChecked) { "lavfi=[loudnorm=$LoudnormTarget]" } else { '' }))
+    $music = Get-CurrentMusic
+    if ($music -and $script:PreviewMusic -ne $music) {
+        if ($null -eq $script:PreviewClipAid) { $script:PreviewClipAid = $script:Mpv.GetProperty('aid') }
+        [void]$script:Mpv.Command('audio-add', $music, 'select')
+        $script:PreviewMusic = $music
+    } elseif (-not $music -and $script:PreviewMusic) {
+        [void]$script:Mpv.SetProperty('aid', $(if ($script:PreviewClipAid) { $script:PreviewClipAid } else { 'auto' }))
+        $script:PreviewMusic = $null
+    }
+}
+
 function Update-Preview([switch]$Reload) {
     if (-not ($script:Mpv -and $script:Mpv.IsAlive -and $script:PreviewPath)) { return }
+    [void]$script:Mpv.SetProperty('speed', (Get-Speed).ToString($inv))
+    if (-not $Reload) { Update-PreviewAudio }
     $vf = Get-PreviewVf $script:PreviewPath
     $rc = $script:Mpv.SetProperty('vf', $vf)
     if ($rc -lt 0) { Write-Log ("Preview filter error: " + [IdealVE.Mpv]::ErrorString($rc)) }
@@ -2392,6 +2576,7 @@ function Update-Preview([switch]$Reload) {
 
     if ($Reload) {
         [void]$script:Mpv.SetProperty('start', $(if ($null -ne $a) { $a.ToString($inv) } else { 'none' }))
+        $script:PreviewMusic = $null; $script:PreviewClipAid = $null   # audio is set up again once the file has loaded
         [void]$script:Mpv.Command('loadfile', $script:PreviewPath)
         [void]$script:Mpv.SetProperty('pause', 'no')
         $txtPauseIcon.Text = [string][char]0xE769
@@ -2470,6 +2655,7 @@ function Read-MpvEvents {
             if ($e.Text -notmatch 'hwaccel|hwdec|cuvid|d3d11va|dxva2|vulkan|AVHWDeviceContext|vaapi|qsv') { Write-Log ("[mpv] " + $e.Text) }
         }
         elseif ($e.Id -eq 7 -and $e.Reason -eq 4) { Write-Log ("Preview failed: " + [IdealVE.Mpv]::ErrorString($e.Error)) }
+        elseif ($e.Id -eq 8) { Update-PreviewAudio }   # file loaded: external music can be added now
     }
 }
 
@@ -2549,6 +2735,14 @@ function Get-RunOptions([switch]$Analysis) {
         if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) { Show-Warning "$tool.exe was not found in PATH."; return $null }
     }
     $o = @{}
+    $o.Speed = Get-Speed
+    $o.AudioEnabled = [bool]$chkAudio.IsChecked
+    $o.Normalize = [bool]$chkNormalize.IsChecked -and $o.AudioEnabled
+    $o.MusicPath = ''
+    if ($o.AudioEnabled -and $chkMusic.IsChecked) {
+        if (-not ($script:MusicPath -and (Test-Path -LiteralPath $script:MusicPath))) { Show-Warning 'Choose a music file, or turn off "Replace with a music file".'; return $null }
+        $o.MusicPath = $script:MusicPath
+    }
     $o.QualityTarget = Get-QualityTarget
     $o.LookKey = Get-LookKey
     $o.AutoCrf = [bool]$chkAutoCrf.IsChecked
@@ -2851,6 +3045,26 @@ $cmbCodec.Add_SelectionChanged({
     Update-CodecUi
     Update-OutputPreview
     Update-OverrideNotes
+})
+
+# Speed and audio
+$cmbSpeed.Add_SelectionChanged({ Update-Enablement; Request-PreviewUpdate })
+foreach ($c in @($chkAudio, $chkMusic, $chkNormalize)) {
+    $c.Add_Checked({ Update-Enablement; Request-PreviewUpdate })
+    $c.Add_Unchecked({ Update-Enablement; Request-PreviewUpdate })
+}
+$btnMusic.Add_Click({
+    $dlg = New-Object Microsoft.Win32.OpenFileDialog
+    $dlg.Filter = 'Audio (*.mp3;*.m4a;*.aac;*.wav;*.flac;*.ogg;*.opus;*.aif;*.aiff)|*.mp3;*.m4a;*.aac;*.wav;*.flac;*.ogg;*.opus;*.aif;*.aiff|All files (*.*)|*.*'
+    $dlg.Title = 'Choose a music file'
+    if ($script:MusicPath) { $dlg.InitialDirectory = [IO.Path]::GetDirectoryName($script:MusicPath) }
+    if ($dlg.ShowDialog($window)) {
+        $script:MusicPath = $dlg.FileName
+        $chkMusic.IsChecked = $true
+        Update-Enablement
+        Write-Log "Music: $($dlg.FileName)"
+        Request-PreviewUpdate
+    }
 })
 
 # Encoding + output toggles
