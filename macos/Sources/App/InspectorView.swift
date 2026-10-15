@@ -15,6 +15,7 @@ struct InspectorView: View {
             LookSection()
             EncodingSection()
             TrimSection()
+            AudioSection()
             OutputSection()
         }
         .formStyle(.grouped)
@@ -199,7 +200,7 @@ struct EncodingSection: View {
     }
 }
 
-// MARK: - Trim
+// MARK: - Trim and speed
 
 struct TrimSection: View {
     @Environment(AppModel.self) private var model
@@ -213,7 +214,7 @@ struct TrimSection: View {
 
     var body: some View {
         @Bindable var model = model
-        Section("Trim") {
+        Section("Trim and speed") {
             HStack {
                 TextField("Trim start", text: $model.trimStart, prompt: Text("Start (s or mm:ss)"))
                     .textFieldStyle(.roundedBorder)
@@ -229,6 +230,59 @@ struct TrimSection: View {
             .onChange(of: model.trimEnd) { _, _ in model.preview.requestUpdate() }
             Caption("Leave empty for the whole clip. The preview loops this range.")
             FieldError(text: error)
+            VStack(alignment: .leading, spacing: 4) {
+                Picker("Speed", selection: $model.speed) {
+                    ForEach(SpeedAudio.speeds, id: \.self) { Text(SpeedAudio.label($0)).tag($0) }
+                }
+                .help("Playback speed of the output")
+                .accessibilityLabel("Speed")
+                Caption(SpeedAudio.hint(model.speed))
+            }
+        }
+    }
+}
+
+// MARK: - Audio
+
+struct AudioSection: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        @Bindable var model = model
+        let audioOn = model.settings.audioEnabled
+        Section("Audio") {
+            VStack(alignment: .leading, spacing: 4) {
+                Toggle("Include audio", isOn: $model.settings.audioEnabled)
+                    .accessibilityLabel("Include audio")
+                Caption("Off removes the soundtrack.")
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Toggle("Replace with a music file", isOn: $model.musicOn)
+                    .accessibilityLabel("Replace with a music file")
+                Caption("Loops if shorter than the clip and fades out at the end.")
+                HStack {
+                    Image(systemName: "music.note").foregroundStyle(.secondary).accessibilityHidden(true)
+                    Text(model.musicPath.isEmpty ? "No music file selected" : (model.musicPath as NSString).lastPathComponent)
+                        .lineLimit(1).truncationMode(.middle)
+                        .foregroundStyle(model.musicPath.isEmpty ? .secondary : .primary)
+                        .help(model.musicPath)
+                        .accessibilityLabel("Music file")
+                        .accessibilityValue(model.musicPath.isEmpty ? "None" : (model.musicPath as NSString).lastPathComponent)
+                    Spacer()
+                    Button("Choose…") { model.chooseMusic() }
+                        .accessibilityLabel("Choose music file")
+                }
+                if audioOn && model.musicOn && model.activeMusic == nil {
+                    FieldError(text: "Choose a music file, or turn off \"Replace with a music file\".")
+                }
+            }
+            .disabled(!audioOn)
+            VStack(alignment: .leading, spacing: 4) {
+                Toggle("Normalise loudness", isOn: $model.settings.normalizeAudio)
+                    .accessibilityLabel("Normalise loudness")
+                Caption("Two-pass EBU R128 to -16 LUFS, peaks at -1.5 dBTP.")
+            }
+            .disabled(!audioOn)
         }
     }
 }

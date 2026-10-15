@@ -23,19 +23,19 @@ public enum PreviewSource {
         return status == noErr
     }
 
-    /// ffmpeg arguments for a preview proxy: 1080p 10-bit HEVC (hardware encoder), limited range, BT.709.
-    /// The look is applied at playback, so the proxy carries the untouched picture.
+    /// ffmpeg arguments for a preview proxy: 1080p 10-bit HEVC (hardware encoder), limited range, BT.709, and the
+    /// clip's audio as AAC (v1.3 previews it). The look is applied at playback, so the proxy carries the untouched picture.
     public static func proxyArguments(source: String, output: String) -> [String] {
-        ["-v", "error", "-y", "-nostdin", "-i", source,
+        ["-v", "error", "-y", "-nostdin", "-i", source, "-map", "0:v:0", "-map", "0:a:0?",
          "-vf", "scale=w=1920:h=1080:force_original_aspect_ratio=decrease:out_range=tv:out_color_matrix=bt709,format=p010le",
          "-c:v", "hevc_videotoolbox", "-profile:v", "main10", "-q:v", "70", "-tag:v", "hvc1",
          "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv",
-         "-an", output]
+         "-c:a", "aac", "-b:a", "192k", output]
     }
 
     public static func proxyPath(for source: String) -> String {
         let attrs = try? FileManager.default.attributesOfItem(atPath: source)
-        let stamp = "\(source)|\((attrs?[.size] as? NSNumber)?.int64Value ?? 0)|\((attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0)"
+        let stamp = "v2|\(source)|\((attrs?[.size] as? NSNumber)?.int64Value ?? 0)|\((attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0)"
         var h: UInt64 = 1469598103934665603
         for b in stamp.utf8 { h = (h ^ UInt64(b)) &* 1099511628211 }
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("IdealVE-preview")

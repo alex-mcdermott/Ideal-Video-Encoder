@@ -47,9 +47,9 @@ import Testing
     @Test func overrideNotesAndLookKey() {
         var s = AppSettings()
         let k = RunOptions.lookKey(settings: s, exposure: 0.04)
-        #expect(k == "hevc|0||0|False")
+        #expect(k == "hevc|0||0|False|1")
         s.codec = .av1; s.grainLevel = .light; s.autoGrain = true
-        #expect(RunOptions.lookKey(settings: s, exposure: -1.25) == "av1|-1.2||1|True")
+        #expect(RunOptions.lookKey(settings: s, exposure: -1.25, speed: 2) == "av1|-1.2||1|True|2")
         let o = ClipOverride(crf: 24, cap: 45, grain: .off, target: 95, key: k, codecName: "HEVC", met: true, vmaf: 95.3)
         #expect(o.note(currentKey: k) == "Analysed for VMAF 95: HEVC CRF 24, 45 Mbps cap")
         #expect(o.note(currentKey: "x") == "Analysed for VMAF 95: HEVC CRF 24, 45 Mbps cap (made with different settings, not used)")

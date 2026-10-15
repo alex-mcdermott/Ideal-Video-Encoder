@@ -44,11 +44,12 @@ public enum Metadata {
             "-TagsFromFile", source,
             "-All", "-makernotes", "-make", "-model",
 
-            // Core Make/Model
-            "-Keys:Make<Make",
-            "-Keys:Model<Model",
+            // Core Make/Model. Keys (Apple's own group, which Photos reads) must come after QuickTime:Make/Model,
+            // which would otherwise override it; with this order Keys, UserData and XMP all get them (#1).
             "-QuickTime:Make<Make",
             "-QuickTime:Model<Model",
+            "-Keys:Make<Make",
+            "-Keys:Model<Model",
 
             // Standard lens data
             "-LensModel<LensModel",
@@ -106,8 +107,9 @@ public enum Metadata {
 public enum CsvLog {
     public static let header = "File,ISO,FLog2,CRF,Grain,OrigBitrate(bps),OrigSize(MB),NewSize(MB),Compression(%),Heat,Notes"
 
-    public static func notes(codec: Codec, iso: Int?, isFLog2: Bool, isFullRange: Bool, exposureText: String, vbvText: String) -> String {
-        "Codec=\(codec.displayName) ISO=\(iso.map(String.init) ?? "") FLog2=\(isFLog2 ? "True" : "False") Range=\(isFullRange ? "full" : "video") EV=\(exposureText) VBV=\(vbvText)"
+    public static func notes(codec: Codec, iso: Int?, isFLog2: Bool, isFullRange: Bool, exposureText: String, vbvText: String,
+                             speed: Double = 1, audioText: String = "clip audio") -> String {
+        "Codec=\(codec.displayName) ISO=\(iso.map(String.init) ?? "") FLog2=\(isFLog2 ? "True" : "False") Range=\(isFullRange ? "full" : "video") EV=\(exposureText) VBV=\(vbvText) Speed=\(Fmt.upTo3(speed))x Audio=\(audioText)"
     }
 
     public static func row(name: String, iso: Int?, isFLog2: Bool, crf: Int, grain: Grain, origBitrate: Double?,

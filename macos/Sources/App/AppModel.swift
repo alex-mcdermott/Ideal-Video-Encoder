@@ -55,6 +55,11 @@ final class AppModel {
     var exposure = 0.0
     var trimStart = ""
     var trimEnd = ""
+    /// Output speed (v1.3); session state like exposure and trim, not saved
+    var speed = 1.0 { didSet { if speed != oldValue { updateNotes(); preview.requestUpdate() } } }
+    /// "Replace with a music file" and the chosen file (v1.3); not saved
+    var musicOn = false { didSet { if musicOn != oldValue { preview.requestUpdate() } } }
+    var musicPath = "" { didSet { if musicPath != oldValue { preview.requestUpdate() } } }
     var runState: RunState = .idle
     var startWhen: StartWhen = .now
     var scheduleHint = ""
@@ -126,7 +131,12 @@ final class AppModel {
     // MARK: settings
 
     /// `Get-LookKey` for the current settings.
-    var lookKey: String { RunOptions.lookKey(settings: settings, exposure: exposure) }
+    var lookKey: String { RunOptions.lookKey(settings: settings, exposure: exposure, speed: speed) }
+
+    /// The music file the preview and encode use: only with audio and "Replace with a music file" on.
+    var activeMusic: String? {
+        settings.audioEnabled && musicOn && !musicPath.isEmpty && FileManager.default.fileExists(atPath: musicPath) ? musicPath : nil
+    }
 
     /// `Update-OverrideNotes`.
     func updateNotes() {
@@ -272,7 +282,8 @@ final class AppModel {
         guard let report = toolReport else { warn("Still checking for ffmpeg, ffprobe and ExifTool. Try again in a moment."); return nil }
         if let t = report.missingTools.first { warn("\(t.rawValue) was not found. Open Setup (Tools) to install it or set its path."); return nil }
         do {
-            return try RunOptions.validate(settings: settings, exposure: exposure, trimStart: trimStart, trimEnd: trimEnd, forAnalysis: forAnalysis)
+            return try RunOptions.validate(settings: settings, exposure: exposure, trimStart: trimStart, trimEnd: trimEnd,
+                                          speed: speed, musicOn: musicOn, musicPath: musicPath, forAnalysis: forAnalysis)
         } catch {
             warn((error as? ProcessError)?.message ?? error.localizedDescription)
             return nil

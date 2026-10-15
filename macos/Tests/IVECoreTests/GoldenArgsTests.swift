@@ -23,7 +23,7 @@ struct GoldenArgsTests {
     @Test func hevcDefaults() {
         let cmd = EncodeCommand(source: src, output: out, codec: .hevc, crf: 21, grain: .off, cap: 35, exposure: 0,
                                 lutPath: nil, isFullRange: false, width: 6240, height: 4160)
-        #expect(cmd.arguments == ["-y", "-nostdin", "-hide_banner", "-i", src, "-vf", tag,
+        #expect(cmd.arguments == ["-y", "-nostdin", "-hide_banner", "-i", src, "-vf", tag, "-map", "0:v:0", "-map", "0:a:0",
                                   "-c:v", "libx265", "-preset", "slow", "-crf", "21", "-maxrate", "35M", "-bufsize", "70M",
                                   "-x265-params", x265Off, "-pix_fmt", "yuv420p10le", "-tag:v", "hvc1"] + tail + [out])
     }
@@ -33,7 +33,7 @@ struct GoldenArgsTests {
         let cmd = EncodeCommand(source: src, output: out, codec: .hevc, crf: 19, grain: .light, cap: 0, exposure: 0.5,
                                 lutPath: lut, isFullRange: true, width: 3840, height: 2160, trimStart: 1.5, trimEnd: 10)
         let vf = "lutyuv=y=val+0.0369*(maxval-minval),format=gbrp10le,lut3d=file='/Users/me/LUTs/F\\:Log2 Bob'\\\\\\''s.cube',zscale=rangein=full:range=limited:matrix=709"
-        #expect(cmd.arguments == ["-y", "-nostdin", "-hide_banner", "-ss", "1.5", "-to", "10", "-i", src, "-vf", vf + "," + tag,
+        #expect(cmd.arguments == ["-y", "-nostdin", "-hide_banner", "-ss", "1.5", "-to", "10", "-i", src, "-vf", vf + "," + tag, "-map", "0:v:0", "-map", "0:a:0",
                                   "-c:v", "libx265", "-preset", "slow", "-crf", "19",
                                   "-x265-params", x265Light, "-pix_fmt", "yuv420p10le", "-tag:v", "hvc1"] + tail + [out])
     }
@@ -42,7 +42,7 @@ struct GoldenArgsTests {
         let cmd = EncodeCommand(source: src, output: out, codec: .hevc, crf: 23, grain: .strong, cap: 12.5, exposure: -1.3,
                                 lutPath: nil, isFullRange: false, width: 1920, height: 1080, trimStart: 90)
         #expect(cmd.arguments == ["-y", "-nostdin", "-hide_banner", "-ss", "90", "-i", src,
-                                  "-vf", "lutyuv=y=val-0.0959*(maxval-minval)," + tag,
+                                  "-vf", "lutyuv=y=val-0.0959*(maxval-minval)," + tag, "-map", "0:v:0", "-map", "0:a:0",
                                   "-c:v", "libx265", "-preset", "slow", "-crf", "23", "-maxrate", "12.5M", "-bufsize", "25M",
                                   "-tune", "grain", "-x265-params", "qg-size=16:rect=1:amp=1",
                                   "-pix_fmt", "yuv420p10le", "-tag:v", "hvc1"] + tail + [out])
@@ -53,7 +53,7 @@ struct GoldenArgsTests {
         let cmd = EncodeCommand(source: src, output: o, codec: .av1, crf: 28, grain: .light, cap: 60, exposure: 0,
                                 lutPath: "/l/a.cube", isFullRange: false, width: 6240, height: 4160, trimEnd: 5)
         #expect(cmd.arguments == ["-y", "-nostdin", "-hide_banner", "-to", "5", "-i", src,
-                                  "-vf", "format=gbrp10le,lut3d=file='/l/a.cube'," + tag,
+                                  "-vf", "format=gbrp10le,lut3d=file='/l/a.cube'," + tag, "-map", "0:v:0", "-map", "0:a:0",
                                   "-c:v", "libsvtav1", "-preset", "5", "-crf", "28", "-maxrate", "60M", "-bufsize", "120M",
                                   "-svtav1-params", "tune=0:film-grain=6:film-grain-denoise=0", "-pix_fmt", "yuv420p10le"] + tail + [o])
     }
@@ -63,7 +63,7 @@ struct GoldenArgsTests {
         let cmd = EncodeCommand(source: src, output: o, codec: .av1, crf: 35, grain: .strong, cap: 0, exposure: 2,
                                 lutPath: nil, isFullRange: true, width: 4096, height: 2304)
         #expect(cmd.arguments == ["-y", "-nostdin", "-hide_banner", "-i", src,
-                                  "-vf", "lutyuv=y=val+0.1476*(maxval-minval),zscale=rangein=full:range=limited:matrix=709," + tag,
+                                  "-vf", "lutyuv=y=val+0.1476*(maxval-minval),zscale=rangein=full:range=limited:matrix=709," + tag, "-map", "0:v:0", "-map", "0:a:0",
                                   "-c:v", "libsvtav1", "-preset", "4", "-crf", "35",
                                   "-svtav1-params", "tune=0:film-grain=12:film-grain-denoise=0", "-pix_fmt", "yuv420p10le"] + tail + [o])
     }
@@ -135,5 +135,115 @@ struct GoldenArgsTests {
         #expect(EncodeCommand.targetDuration(source: 30, trimStart: 5, trimEnd: nil) == 25)
         #expect(EncodeCommand.targetDuration(source: 30, trimStart: nil, trimEnd: 8) == 8)
         #expect(EncodeCommand.targetDuration(source: 30, trimStart: 2, trimEnd: 8) == 6)
+    }
+
+    // MARK: speed and audio (Windows v1.3.0, issue #10)
+
+    @Test func speedFilters() {
+        let r2997 = FrameRate(num: 30000, den: 1001), r11988 = FrameRate(num: 120000, den: 1001)
+        #expect(SpeedAudio.speedFilters(1, rate: r2997).isEmpty)
+        // 120 fps at 0.25x is conformed: every captured frame, played at 29.97
+        #expect(SpeedAudio.speedFilters(0.25, rate: r11988) == ["setpts=PTS/0.25", "fps=fps=30000/1001"])
+        #expect(SpeedAudio.speedFilters(0.5, rate: FrameRate(num: 60000, den: 1001)) == ["setpts=PTS/0.5", "fps=fps=30000/1001"])
+        // Otherwise the source rate is kept (frames repeat when slowed, drop when sped up)
+        #expect(SpeedAudio.speedFilters(0.5, rate: r2997) == ["setpts=PTS/0.5", "fps=fps=30000/1001"])
+        #expect(SpeedAudio.speedFilters(0.125, rate: r2997) == ["setpts=PTS/0.125", "fps=fps=30000/1001"])
+        #expect(SpeedAudio.speedFilters(2, rate: FrameRate(num: 30, den: 1)) == ["setpts=PTS/2", "fps=fps=30/1"])
+        #expect(SpeedAudio.speedFilters(1.5, rate: FrameRate(num: 25, den: 1)) == ["setpts=PTS/1.5", "fps=fps=25/1"])
+        #expect(FrameRate.parse("120000/1001") == r11988 && FrameRate.parse("0/0") == .fallback && FrameRate.parse(nil) == .fallback)
+    }
+
+    @Test func atempo() {
+        #expect(SpeedAudio.atempoFilters(1).isEmpty)
+        #expect(SpeedAudio.atempoFilters(0.125) == ["atempo=0.5", "atempo=0.5", "atempo=0.5"])
+        #expect(SpeedAudio.atempoFilters(0.25) == ["atempo=0.5", "atempo=0.5"])
+        #expect(SpeedAudio.atempoFilters(0.5) == ["atempo=0.5"])
+        #expect(SpeedAudio.atempoFilters(0.75) == ["atempo=0.75"])
+        #expect(SpeedAudio.atempoFilters(1.5) == ["atempo=1.5"])
+        #expect(SpeedAudio.atempoFilters(8) == ["atempo=8"])
+    }
+
+    func audioCmd(speed: Double = 1, trim: (Double?, Double?) = (nil, nil), plan: EncodeCommand.AudioPlan) -> EncodeCommand {
+        var c = EncodeCommand(source: src, output: out, codec: .hevc, crf: 21, grain: .off, cap: 0, exposure: 0,
+                              lutPath: nil, isFullRange: false, width: 1920, height: 1080, trimStart: trim.0, trimEnd: trim.1)
+        c.speed = speed; c.rate = FrameRate(num: 30000, den: 1001); c.sourceDuration = 10; c.audio = plan
+        return c
+    }
+    let video = ["-c:v", "libx265", "-preset", "slow", "-crf", "21", "-x265-params", x265Off, "-pix_fmt", "yuv420p10le", "-tag:v", "hvc1"]
+    let colour = ["-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv", "-movflags", "+faststart"]
+    let aac = ["-c:a", "aac", "-b:a", "320k", "-ar", "48000", "-ac", "2"]
+    let loud = "loudnorm=I=-16:TP=-1.5:LRA=11:measured_I=-51.80:measured_TP=-40.02:measured_LRA=0.00:measured_thresh=-61.80:offset=0.04:linear=true"
+
+    @Test func audioOffAndNoAudioStream() {
+        let off = audioCmd(plan: .init(include: false))
+        #expect(off.arguments == ["-y", "-nostdin", "-hide_banner", "-i", src, "-vf", tag, "-map", "0:v:0"] + video + ["-an"] + colour + [out])
+        #expect(off.audioText == "no audio")
+        // Audio on, but the clip has none and no music: -an, no error
+        let silent = audioCmd(plan: .init(include: true, sourceHasAudio: false))
+        #expect(silent.arguments == off.arguments)
+        // Off also ignores a chosen music file
+        #expect(audioCmd(plan: .init(include: false, musicPath: "/m/song.mp3")).arguments == off.arguments)
+    }
+
+    @Test func clipAudioSlowedAndNormalised() {
+        var p = EncodeCommand.AudioPlan(include: true, sourceHasAudio: true)
+        p.loudnorm = loud
+        let c = audioCmd(speed: 0.125, plan: p)
+        #expect(c.arguments == ["-y", "-nostdin", "-hide_banner", "-i", src, "-vf", "setpts=PTS/0.125,fps=fps=30000/1001," + tag,
+                                "-map", "0:v:0", "-map", "0:a:0"] + video + aac +
+                               ["-af", "atempo=0.5,atempo=0.5,atempo=0.5," + loud] + colour + [out])
+        #expect(c.audioText == "clip audio, normalised")
+        #expect(c.outDuration == 80)
+    }
+
+    @Test func musicTwiceAsFastNormalisedTrimmed() {
+        var p = EncodeCommand.AudioPlan(include: true, sourceHasAudio: true, musicPath: "/m/song.mp3")
+        p.loudnorm = loud
+        let c = audioCmd(speed: 2, trim: (1, 5), plan: p)
+        // Music input after the clip; -vf and every other output option after both; music not time-stretched;
+        // fade = min(2, 2/4) = 0.5 s ending at the output length (4 s / 2 = 2 s)
+        #expect(c.arguments == ["-y", "-nostdin", "-hide_banner", "-ss", "1", "-to", "5", "-i", src,
+                                "-stream_loop", "-1", "-i", "/m/song.mp3",
+                                "-vf", "setpts=PTS/2,fps=fps=30000/1001," + tag, "-map", "0:v:0", "-map", "1:a:0"] + video + aac +
+                               ["-af", loud + ",afade=t=out:st=1.5:d=0.5", "-shortest", "-t", "2"] + colour + [out])
+        #expect(c.audioText == "music: song.mp3, normalised")
+        // The loudness pass measures the music on its own (0:a:0) over the output length
+        #expect(SpeedAudio.loudnormMeasureArguments(inputs: c.musicInput, map: "0:a:0", pre: c.audioPreFilters, duration: c.outDuration) ==
+                ["-hide_banner", "-nostdin", "-stream_loop", "-1", "-i", "/m/song.mp3", "-map", "0:a:0", "-vn",
+                 "-af", "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json", "-t", "2", "-f", "null", "-"])
+    }
+
+    @Test func loudnessMeasureOfClip() {
+        let c = audioCmd(speed: 0.75, trim: (2, nil), plan: .init())
+        #expect(SpeedAudio.loudnormMeasureArguments(inputs: c.clipInput, map: "0:a:0", pre: c.audioPreFilters, duration: 0) ==
+                ["-hide_banner", "-nostdin", "-ss", "2", "-i", src, "-map", "0:a:0", "-vn",
+                 "-af", "atempo=0.75,loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json", "-f", "null", "-"])
+        let stderr = """
+            [Parsed_loudnorm_1 @ 0x600] \u{20}
+            {
+            \t"input_i" : "-51.80",
+            \t"input_tp" : "-40.02",
+            \t"input_lra" : "0.00",
+            \t"input_thresh" : "-61.80",
+            \t"output_i" : "-16.09",
+            \t"output_tp" : "-4.31",
+            \t"output_lra" : "0.00",
+            \t"output_thresh" : "-26.09",
+            \t"normalization_type" : "linear",
+            \t"target_offset" : "0.04"
+            }
+            """
+        let l = SpeedAudio.parseLoudness(stderr)
+        #expect(l?.secondPassFilter == loud && l?.integrated == -51.8)
+        #expect(SpeedAudio.parseLoudness("no json here") == nil)
+    }
+
+    @Test func fadeAndDurations() {
+        #expect(SpeedAudio.fadeFilter(outDuration: 4) == "afade=t=out:st=3:d=1")
+        #expect(SpeedAudio.fadeFilter(outDuration: 30) == "afade=t=out:st=28:d=2")
+        #expect(SpeedAudio.fadeFilter(outDuration: 0) == nil)
+        #expect(SpeedAudio.outDuration(source: 10, trimStart: 1, trimEnd: 3, speed: 0.5) == 4)
+        #expect(Fmt.upTo3(30000) == "30000" && Fmt.upTo3(2.5) == "2.5" && Fmt.upTo3(0.125) == "0.125" && Fmt.upTo3(1.0004) == "1")
+        #expect(SpeedAudio.label(1) == "1x (normal)" && SpeedAudio.label(0.125) == "0.125x" && SpeedAudio.label(8) == "8x")
     }
 }

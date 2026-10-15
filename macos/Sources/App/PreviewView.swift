@@ -8,8 +8,9 @@ import AVKit
 import IVECore
 import SwiftUI
 
-/// The live preview: AVFoundation playback through the encode's look (exposure -> LUT), in Core Image.
-/// Look changes apply to the next frame; trim changes rebuild the gapless loop.
+/// The live preview: AVFoundation playback through the encode's look (exposure -> LUT), in Core Image, at the
+/// output speed with the output's audio (v1.3). Look changes apply to the next frame; trim, speed and music
+/// changes rebuild the gapless loop; mute and loudness apply live.
 @MainActor @Observable
 final class PreviewModel {
     @ObservationIgnored weak var app: AppModel?
@@ -17,15 +18,26 @@ final class PreviewModel {
     var isPlaying = false
     var busy: String?
     var isProxy = false
-    /// Playback position, e.g. "0:01.2"
+    /// Playback position on the output's timeline, e.g. "0:01.2"
     var timeText = ""
     let player = AVQueuePlayer()
 
+    /// What the current timeline was built for, and the pieces to play it.
+    private struct Timeline {
+        let key: String
+        let speed: Double
+        let asset: AVAsset
+        let composition: AVVideoComposition
+        let mix: AVAudioMix?
+    }
+
     @ObservationIgnored private let look = LockedBox(PreviewLook())
+    @ObservationIgnored private let gain = LoudnessGain()
     @ObservationIgnored private var path: String?
-    @ObservationIgnored private var asset: AVAsset?
+    /// The file AVFoundation plays: the source, or its proxy
+    @ObservationIgnored private var playURL: URL?
     @ObservationIgnored private var duration: CMTime = .zero
-    @ObservationIgnored private var composition: AVVideoComposition?
+    @ObservationIgnored private var timeline: Timeline?
     @ObservationIgnored private var looper: AVPlayerLooper?
     @ObservationIgnored private var loopRange: CMTimeRange?
     @ObservationIgnored private var isFull = false
@@ -33,6 +45,10 @@ final class PreviewModel {
     @ObservationIgnored private var updateTask: Task<Void, Never>?
     @ObservationIgnored private var loadTask: Task<Void, Never>?
     @ObservationIgnored private var rangeCache: [String: Bool] = [:]
+    /// Integrated loudness (LUFS) by file, from the encode's first loudnorm pass; -inf when there's no audio
+    @ObservationIgnored private var loudness: [String: Double] = [:]
+    @ObservationIgnored private var measureTask: Task<Void, Never>?
+    @ObservationIgnored private var measuring: String?
 
     init() {
         player.automaticallyWaitsToMinimizeStalling = false
@@ -67,16 +83,14 @@ final class PreviewModel {
             isFull = m.isFullRange; rangeCache[source] = isFull
         }
         var url = URL(fileURLWithPath: source)
-        var a: AVAsset = AVURLAsset(url: url)
         isProxy = false
-        if !(await PreviewSource.canDecode(a)) {
+        if !(await PreviewSource.canDecode(AVURLAsset(url: url))) {
             // AVFoundation can't decode it (e.g. hev1-tagged HEVC): play an ffmpeg-made proxy instead
             guard let ffmpeg = app.toolReport?.paths[.ffmpeg] else { app.appendLog("Preview: this file can't be decoded by macOS and ffmpeg is missing."); nowPlaying = nil; return }
             busy = "Making a preview proxy…"
             app.appendLog("Preview: macOS can't decode \(name); making a preview proxy with ffmpeg.")
             do {
                 url = URL(fileURLWithPath: try await PreviewSource.makeProxy(ffmpeg: ffmpeg, source: source))
-                a = AVURLAsset(url: url)
                 isProxy = true
             } catch {
                 app.appendLog("Preview failed: \(error.localizedDescription)")
@@ -85,18 +99,15 @@ final class PreviewModel {
             }
         }
         guard !Task.isCancelled else { return }
-        do {
-            updateLook()
-            composition = try await PreviewComposition.make(asset: a, look: look)
-        } catch {
-            app.appendLog("Preview failed: \(error.localizedDescription)")
-            nowPlaying = nil
+        duration = (try? await AVURLAsset(url: url).load(.duration)) ?? .zero
+        playURL = url
+        path = source
+        timeline = nil
+        updateLook()
+        guard await rebuild(force: true) else {
+            if !Task.isCancelled { nowPlaying = nil }
             return
         }
-        duration = (try? await a.load(.duration)) ?? .zero
-        asset = a
-        path = source
-        rebuildLoop(force: true)
         player.play()
         isPlaying = true
         if let hw = await HardwareDecode.isSupported(for: AVURLAsset(url: url)) {
@@ -106,10 +117,12 @@ final class PreviewModel {
 
     func stop() {
         loadTask?.cancel()
+        updateTask?.cancel()
         stopPlayback()
         nowPlaying = nil
         path = nil
-        asset = nil
+        playURL = nil
+        timeline = nil
     }
 
     private func stopPlayback() {
@@ -133,7 +146,7 @@ final class PreviewModel {
             try? await Task.sleep(for: .milliseconds(100))
             guard !Task.isCancelled, let self else { return }
             self.updateLook()
-            self.rebuildLoop(force: false)
+            await self.rebuild(force: false)
             self.refreshIfPaused()
         }
     }
@@ -151,7 +164,34 @@ final class PreviewModel {
         look.mutate { $0 = PreviewLook(exposure: app.exposure, isFullRange: isFull, lut: lut) }
     }
 
-    /// The trim range as a loop range (invalid or empty fields mean the whole clip).
+    /// Mute when audio is off, and the normalising gain: each file (the clip, or the music) is measured once
+    /// with the encode's first loudnorm pass, then played at -16 LUFS; the gain changes live.
+    private func updateAudio() {
+        guard let app else { return }
+        player.isMuted = !app.settings.audioEnabled
+        guard app.settings.audioEnabled, app.settings.normalizeAudio, let file = app.activeMusic ?? path else {
+            gain.decibels = 0
+            return
+        }
+        if let l = loudness[file] { gain.decibels = LoudnessGain.decibels(toTarget: l); return }
+        gain.decibels = 0
+        guard measuring != file, let ffmpeg = app.toolReport?.paths[.ffmpeg] else { return }
+        measuring = file
+        measureTask?.cancel()
+        measureTask = Task { [weak self] in
+            let m = try? await SpeedAudio.measureLoudness(ffmpeg: ffmpeg, inputs: ["-i", file], map: "0:a:0", pre: [], duration: 0)
+            guard !Task.isCancelled, let self else { return }
+            self.measuring = nil
+            let lufs = m?.integrated ?? -.infinity
+            self.loudness[file] = lufs
+            if lufs.isFinite {
+                self.app?.appendLog(String(format: "Preview: loudness %.1f LUFS, playing at %+.1f dB", lufs, LoudnessGain.decibels(toTarget: lufs)))
+            }
+            self.updateAudio()
+        }
+    }
+
+    /// The trim range in the source's time (invalid or empty fields mean the whole clip).
     private func trimRange(duration: CMTime) -> CMTimeRange {
         guard let app else { return CMTimeRange(start: .zero, duration: duration) }
         var a: Double?, b: Double?
@@ -165,20 +205,55 @@ final class PreviewModel {
                            end: CMTime(seconds: max(end, start + 0.05), preferredTimescale: 600))
     }
 
-    private func rebuildLoop(force: Bool) {
-        guard let asset, let composition else { return }
-        let range = trimRange(duration: duration)
-        guard force || range != loopRange else { return }
+    /// Builds the timeline for the current speed and music (when they changed) and loops the trim range on it.
+    /// Returns false if the preview can't be built.
+    @discardableResult
+    private func rebuild(force: Bool) async -> Bool {
+        guard let app, let playURL, let path else { return false }
+        updateAudio()
+        let speed = app.speed
+        let music = app.activeMusic
+        let source = trimRange(duration: duration)
+        let loop = CMTimeRange(start: CMTimeMultiplyByFloat64(source.start, multiplier: 1 / speed),
+                               end: CMTimeMultiplyByFloat64(source.end, multiplier: 1 / speed))
+        // Music starts at the loop's start and fades at its end, so it depends on the loop too
+        let key = "\(speed)|" + (music.map { "\($0)|\(loop.start.value)/\(loop.start.timescale)|\(loop.end.value)/\(loop.end.timescale)" } ?? "")
+        if force || timeline?.key != key {
+            do {
+                let asset = try await PreviewTimeline.make(source: AVURLAsset(url: playURL), speed: speed,
+                                                           music: music.map { URL(fileURLWithPath: $0) }, musicFrom: loop.start)
+                let composition = try await PreviewComposition.make(asset: asset, look: look)
+                let mix = await PreviewTimeline.audioMix(for: asset, gain: gain, fadeOutEnding: music == nil ? nil : loop)
+                guard !Task.isCancelled, self.path == path else { return false }
+                let previous = timeline?.speed
+                timeline = Timeline(key: key, speed: speed, asset: asset, composition: composition, mix: mix)
+                restartLoop(loop, source: source, previousSpeed: previous, force: force)
+            } catch {
+                app.appendLog("Preview failed: \(error.localizedDescription)")
+                return false
+            }
+        } else if loop != loopRange {
+            restartLoop(loop, source: source, previousSpeed: speed, force: false)
+        }
+        return true
+    }
+
+    private func restartLoop(_ range: CMTimeRange, source: CMTimeRange, previousSpeed: Double?, force: Bool) {
+        guard let t = timeline else { return }
         let wasPlaying = force || player.rate != 0
-        // Keep the current position if it is still inside the new range
-        let current = player.currentTime()
+        // Keep the position (in source time) if it is still inside the new range
+        var current = player.currentTime()
+        if let p = previousSpeed, current.isNumeric { current = CMTimeMultiplyByFloat64(current, multiplier: p / t.speed) }
         looper?.disableLooping()
         player.removeAllItems()
-        let template = AVPlayerItem(asset: asset)
-        template.videoComposition = composition
+        let template = AVPlayerItem(asset: t.asset)
+        template.videoComposition = t.composition
+        template.audioMix = t.mix
+        template.audioTimePitchAlgorithm = .spectral   // slowed or sped-up clip audio keeps its pitch, like atempo
         looper = AVPlayerLooper(player: player, templateItem: template, timeRange: range)
-        if !force || range.duration != duration {
-            app?.appendLog(String(format: "Preview loops %.2f-%.2f s", range.start.seconds, range.end.seconds))
+        if !force || source.duration != duration || !SpeedAudio.isNormal(t.speed) {
+            app?.appendLog(String(format: "Preview loops %.2f-%.2f s", source.start.seconds, source.end.seconds)
+                           + (SpeedAudio.isNormal(t.speed) ? "" : " at \(Fmt.upTo3(t.speed))x"))
         }
         loopRange = range
         if !force, range.containsTime(current) {
@@ -190,7 +265,7 @@ final class PreviewModel {
     /// A paused player keeps showing the old frame; re-render it with the new look.
     private func refreshIfPaused() {
         guard player.rate == 0, let item = player.currentItem else { return }
-        item.videoComposition = composition?.mutableCopy() as? AVVideoComposition
+        item.videoComposition = timeline?.composition.mutableCopy() as? AVVideoComposition
         player.seek(to: player.currentTime(), toleranceBefore: .zero, toleranceAfter: .zero)
     }
 }
@@ -223,7 +298,7 @@ struct PreviewPane: View {
                     VStack(spacing: 8) {
                         Image(systemName: "play.rectangle").font(.system(size: 40)).foregroundStyle(.white.opacity(0.8))
                         Text("Live preview").appFont(.title3, weight: .semibold).foregroundStyle(.white.opacity(0.9))
-                        Text("Select a clip and press Preview. Exposure, LUT and trim changes apply instantly.")
+                        Text("Select a clip and press Preview. Exposure, LUT, trim, speed and audio changes apply instantly.")
                             .appFont(.callout).foregroundStyle(.white.opacity(0.6)).multilineTextAlignment(.center)
                     }
                     .padding()

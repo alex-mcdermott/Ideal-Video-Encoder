@@ -20,6 +20,10 @@ public struct AppSettings: Equatable, Sendable {
     public var qualityTarget = 0
     /// "Later at" time as typed (v1.2); whether a start is scheduled isn't saved
     public var scheduleTime = "04:00"
+    /// "Include audio" (v1.3); saved, default on
+    public var audioEnabled = true
+    /// "Normalise loudness" (v1.3); saved, default off
+    public var normalizeAudio = false
     public var vbrEnabled = true
     public var maxRate = "35"
     public var outputMode: OutputMode = .source
@@ -49,7 +53,7 @@ public struct AppSettings: Equatable, Sendable {
 extension AppSettings: Codable {
     enum CodingKeys: String, CodingKey {
         case lutPath = "LutPath", lutEnabled = "LutEnabled", codec = "Codec", autoCrf = "AutoCrf", crfHevc = "CrfHevc",
-             crfAv1 = "CrfAv1", autoGrain = "AutoGrain", grainLevel = "GrainLevel", qualityTarget = "QualityTarget", scheduleTime = "ScheduleTime", vbrEnabled = "VbrEnabled",
+             crfAv1 = "CrfAv1", autoGrain = "AutoGrain", grainLevel = "GrainLevel", qualityTarget = "QualityTarget", scheduleTime = "ScheduleTime", audioEnabled = "AudioEnabled", normalizeAudio = "NormalizeAudio", vbrEnabled = "VbrEnabled",
              maxRate = "MaxRate", outputMode = "OutputMode", outputFolder = "OutputFolder", subfolder = "Subfolder",
              csvEnabled = "CsvEnabled", csvPath = "CsvPath", legacyCrf = "Crf",
              ffmpegPath = "FfmpegPath", ffprobePath = "FfprobePath", exiftoolPath = "ExiftoolPath"
@@ -85,6 +89,8 @@ extension AppSettings: Codable {
         if let g = str(.grainLevel).flatMap(Int.init), let grain = Grain(rawValue: g) { grainLevel = grain }
         if let t = str(.qualityTarget).flatMap(Int.init), [93, 95, 97].contains(t) { qualityTarget = t }
         if let t = str(.scheduleTime), !t.isEmpty { scheduleTime = t }
+        if c.contains(.audioEnabled) { audioEnabled = flag(.audioEnabled) }   // missing (older files) keeps the default: on
+        normalizeAudio = flag(.normalizeAudio)
         vbrEnabled = flag(.vbrEnabled)
         if let v = str(.maxRate), !v.isEmpty { maxRate = v }
         if str(.outputMode) == "custom" { outputMode = .custom }
@@ -110,6 +116,8 @@ extension AppSettings: Codable {
         try c.encode(grainLevel.rawValue, forKey: .grainLevel)
         try c.encode(qualityTarget, forKey: .qualityTarget)
         try c.encode(scheduleTime.trimmingCharacters(in: .whitespaces), forKey: .scheduleTime)
+        try c.encode(audioEnabled, forKey: .audioEnabled)
+        try c.encode(normalizeAudio, forKey: .normalizeAudio)
         try c.encode(vbrEnabled, forKey: .vbrEnabled)
         try c.encode(maxRate, forKey: .maxRate)
         try c.encode(outputMode.rawValue, forKey: .outputMode)

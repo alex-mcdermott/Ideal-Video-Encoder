@@ -37,6 +37,13 @@ public enum Fmt {
         return s
     }
 
+    /// Custom format "0.###" (at most three decimals, no trailing zeros).
+    public static func upTo3(_ v: Double) -> String {
+        var s = fixed(v, 3)
+        while s.contains(".") && (s.hasSuffix("0") || s.hasSuffix(".")) { s.removeLast() }
+        return s
+    }
+
     /// Custom format "+0.0;-0.0;0.0" used for exposure.
     public static func signed1(_ v: Double) -> String {
         let s = fixed(abs(v), 1)

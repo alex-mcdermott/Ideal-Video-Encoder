@@ -202,7 +202,7 @@ struct EncodeIntegrationTests {
         #expect(bytes.starts(with: [0xEF, 0xBB, 0xBF]))
         let rows = String(decoding: bytes.dropFirst(3), as: UTF8.self).components(separatedBy: "\r\n").filter { !$0.isEmpty }
         #expect(rows.count == 3 && rows[0] == CsvLog.header)
-        #expect(rows[1].hasPrefix("\"lim422.mov\",,False,21,0,") && rows[1].hasSuffix(",\"Codec=HEVC ISO= FLog2=False Range=video EV=0.0 VBV=off\""))
+        #expect(rows[1].hasPrefix("\"lim422.mov\",,False,21,0,") && rows[1].hasSuffix(",\"Codec=HEVC ISO= FLog2=False Range=video EV=0.0 VBV=off Speed=1x Audio=clip audio\""), "\(rows)")   // v1.3 notes
 
         // Next to the source with no subfolder: never overwrite the source itself
         let side = try await fx.scratch("side")

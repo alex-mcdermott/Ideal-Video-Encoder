@@ -164,7 +164,30 @@ public struct EncodeWorker: Sendable {
                                         exposure: opt.exposure, lutPath: opt.lutPath, isFullRange: isFull,
                                         width: info.width, height: info.height, trimStart: opt.trimStart, trimEnd: opt.trimEnd)
                 cmd.useZscale = hasZscale
-                if !cmd.filters.isEmpty { log("\(name): filters \(cmd.filters.joined(separator: ","))") }   // the script's chain; BT.709 tagging is appended
+                // Speed: output time = trimmed source time / speed; the speed change follows the look in the chain
+                cmd.speed = opt.speed
+                cmd.rate = info.rFrameRate
+                cmd.sourceDuration = info.duration
+                let shownFilters = cmd.filters + SpeedAudio.speedFilters(opt.speed, rate: info.rFrameRate)
+                if !shownFilters.isEmpty { log("\(name): filters \(shownFilters.joined(separator: ","))") }   // the script's chain; BT.709 tagging is appended
+
+                // Audio: off, the clip's own (tempo-matched to the speed), or a music file (looped, faded out at the end);
+                // either can be loudness-normalised in two passes
+                let wantsMusic = opt.audioEnabled && opt.musicPath != nil
+                let hasAudio = wantsMusic ? true : (opt.audioEnabled ? try await uncancellable { await Probe.hasAudio(ffprobe: tools.ffprobe, path: file) } : false)
+                cmd.audio = EncodeCommand.AudioPlan(include: opt.audioEnabled, sourceHasAudio: hasAudio, musicPath: wantsMusic ? opt.musicPath : nil)
+                if opt.normalize && cmd.audio.active {
+                    setClip(file, "Measuring loudness", .active, 0, nil)
+                    // The music is the only input when measuring (0:a:0), over the output length
+                    let l = try await SpeedAudio.measureLoudness(ffmpeg: tools.ffmpeg, inputs: wantsMusic ? cmd.musicInput : cmd.clipInput,
+                                                                 map: "0:a:0", pre: cmd.audioPreFilters,
+                                                                 duration: wantsMusic ? cmd.outDuration : 0, niceness: niceness)
+                    cmd.audio.loudnorm = l.secondPassFilter
+                    log("\(name): loudness \(l.inputI) LUFS, true peak \(l.inputTP) dBTP; normalising to -16 LUFS")
+                }
+                let audioText = cmd.audioText
+                if !SpeedAudio.isNormal(opt.speed) { detailBase += " \(dot) \(Fmt.upTo3(opt.speed))x" }
+                if audioText != "clip audio" { detailBase += " \(dot) \(audioText)" }
 
                 // Remove an existing output so ffmpeg/ExifTool start clean
                 if FileManager.default.fileExists(atPath: out) {
@@ -173,7 +196,8 @@ public struct EncodeWorker: Sendable {
                 }
                 log("\(name): pixel format \(info.pixelFormat ?? "")")
 
-                let targetDuration = EncodeCommand.targetDuration(source: info.duration, trimStart: opt.trimStart, trimEnd: opt.trimEnd)
+                // Progress is measured in output time
+                let targetDuration = cmd.outDuration
                 setClip(file, "Encoding 0%", .active, 0, detailBase)
                 let tail = LockedBox<[String]>([])
                 let progress = ProgressParser(target: targetDuration)
@@ -225,7 +249,7 @@ public struct EncodeWorker: Sendable {
                 let origMB = origSize / mb, newMB = newSize / mb
                 let ratio = origMB > 0 ? Fmt.round((1 - newMB / origMB) * 100, 1) : 0
                 let notes = CsvLog.notes(codec: opt.codec, iso: iso, isFLog2: isFLog2, isFullRange: isFull,
-                                         exposureText: opt.exposureText, vbvText: vbvText)
+                                         exposureText: opt.exposureText, vbvText: vbvText, speed: opt.speed, audioText: audioText)
                 log("\(name) -> \(out) | saved \(Fmt.num(ratio))% (\(Fmt.num(Fmt.round(origMB, 1))) -> \(Fmt.num(Fmt.round(newMB, 1))) MB) | CRF=\(crf) Grain=\(grain.rawValue) VBV=\(vbvText) EV=\(opt.exposureText) | Heat \(heat)")
                 if opt.csvEnabled {
                     let row = CsvLog.row(name: name, iso: iso, isFLog2: isFLog2, crf: crf, grain: grain, origBitrate: info.streamBitRate,
