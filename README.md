@@ -6,6 +6,10 @@ A Windows and Mac app that turns large in-camera video files into compact, high-
 
 It was built around Fujifilm footage (X-H2S 6.2K open gate, X-T5 6.2K/4K, F-Log2) but works with any `.MOV` or `.MP4` that FFmpeg can read. Both versions use the same encoder settings, analyser and settings file format.
 
+![Demo: an F-Log clip is previewed, graded with a LUT and an exposure tweak, then encoded](assets/demo.gif)
+
+*On Windows: an X-T3 F-Log clip is previewed, graded with Fujifilm's ETERNA LUT and +0.3 EV, then encoded to HEVC (104 MB to 13 MB). The encoding wait is shown at 12× speed.*
+
 | Windows | macOS |
 | --- | --- |
 | ![Ideal Video Encoder on Windows](assets/screenshot.png) | ![Ideal Video Encoder on macOS](assets/screenshot-macos.png) |
