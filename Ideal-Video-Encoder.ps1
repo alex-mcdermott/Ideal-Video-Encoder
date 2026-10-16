@@ -430,6 +430,72 @@ $CoreScript = {
         return "loudnorm=$($LoudnormTarget):measured_I=$($m.input_i):measured_TP=$($m.input_tp):measured_LRA=$($m.input_lra):measured_thresh=$($m.input_thresh):offset=$($m.target_offset):linear=true"
     }
 
+    # ---- Camera picture settings ----
+    # The camera's look (Fujifilm film simulation, Nikon Picture Control, ...) and other settings live in the maker
+    # notes, which ExifTool can't write into a video, and QuickTime has no tags for them. A small ExifTool config
+    # defines this app's own Keys, e.g. io.github.alex-mcdermott.ive.film-simulation (written only when present).
+    $CameraKeyPrefix = 'io.github.alex-mcdermott.ive.'
+    $CameraKeyNames = @('film-simulation', 'picture-control', 'picture-style', 'photo-style', 'creative-style', 'picture-mode',
+        'dynamic-range', 'highlight-tone', 'shadow-tone', 'active-d-lighting', 'white-balance', 'focus-mode',
+        'image-stabilization', 'camera-serial-number', 'lens-serial-number')
+    function Get-CameraKeyTag([string]$key) { 'IVE' + (($key -split '-' | ForEach-Object { $_.Substring(0, 1).ToUpper() + $_.Substring(1) }) -join '') }
+
+    function Get-ExifToolConfig {
+        $path = Join-Path ([IO.Path]::GetTempPath()) 'IdealVideoEncoder-exiftool.config'
+        $defs = $CameraKeyNames | ForEach-Object { "        '$CameraKeyPrefix$_' => { Name => '$(Get-CameraKeyTag $_)', Writable => 'string' }," }
+        $lines = @('# Written by Ideal Video Encoder: QuickTime Keys for camera picture settings',
+            '%Image::ExifTool::UserDefined = (', "    'Image::ExifTool::QuickTime::Keys' => {") + $defs + @('    },', ');', '1;')
+        [IO.File]::WriteAllLines($path, [string[]]$lines)
+        return $path
+    }
+
+    # Returns @{ Settings = ordered key -> value; Look = 'Film simulation: Classic Chrome' (or $null) }
+    function Get-CameraSettings([string]$path) {
+        $tags = 'Make', 'FilmMode', 'Saturation', 'PictureControlName', 'PictureStyle', 'PhotoStyle', 'CreativeStyle', 'PictureMode',
+            'DevelopmentDynamicRange', 'HighlightTone', 'ShadowTone', 'ActiveD-Lighting', 'WhiteBalance', 'FocusMode',
+            'ImageStabilization', 'VRMode', 'SerialNumber', 'InternalSerialNumber', 'LensSerialNumber'
+        $m = @{}
+        try {
+            $o = ((Invoke-Hidden 'exiftool' (@('-j') + ($tags | ForEach-Object { "-$_" }) + $path)) -join "`n" | ConvertFrom-Json)[0]
+            foreach ($p in $o.PSObject.Properties) {
+                $v = ([string]$p.Value -replace '[^\x20-\x7E]', '').Trim()   # ASCII only: values go on the ExifTool command line
+                if ($v -and $v -ne 'n/a') { $m[$p.Name] = $v }
+            }
+        } catch {}
+        $make = [string]$m['Make']
+        $s = [ordered]@{}; $look = $null
+
+        # The look, under each maker's own name. Fujifilm keeps monochrome simulations (Acros, B&W, Sepia) under
+        # Saturation; its PictureMode is the exposure mode, so PictureMode only counts on OM System / Olympus.
+        $film = $m['FilmMode']
+        if (-not $film -and $make -match 'fujifilm' -and $m['Saturation'] -match 'Acros|B&W|Sepia|Mono') { $film = $m['Saturation'] }
+        $looks = @(
+            @('film-simulation', 'Film simulation', $film),
+            @('picture-control', 'Picture Control', $m['PictureControlName']),
+            @('picture-style',   'Picture Style',   $m['PictureStyle']),
+            @('photo-style',     'Photo Style',     $m['PhotoStyle']),
+            @('creative-style',  'Creative Style',  $m['CreativeStyle']),
+            @('picture-mode',    'Picture Mode',    $(if ($make -match 'olympus|om digital') { $m['PictureMode'] })))
+        foreach ($l in $looks) {
+            if ($l[2]) { $s[$l[0]] = $l[2]; if (-not $look) { $look = "$($l[1]): $($l[2])" } }
+        }
+
+        $dr = $m['DevelopmentDynamicRange']; if ($dr -match '^\d+$') { $dr = "DR$dr" }
+        $other = [ordered]@{
+            'dynamic-range'        = $dr
+            'highlight-tone'       = $m['HighlightTone']
+            'shadow-tone'          = $m['ShadowTone']
+            'active-d-lighting'    = $m['ActiveD-Lighting']
+            'white-balance'        = $m['WhiteBalance']
+            'focus-mode'           = $m['FocusMode']
+            'image-stabilization'  = $(if ($m['ImageStabilization']) { $m['ImageStabilization'] } else { $m['VRMode'] })
+            'camera-serial-number' = $(if ($m['SerialNumber']) { $m['SerialNumber'] } else { $m['InternalSerialNumber'] })
+            'lens-serial-number'   = $m['LensSerialNumber']
+        }
+        foreach ($k in $other.Keys) { if ($other[$k]) { $s[$k] = $other[$k] } }
+        return @{ Settings = $s; Look = $look }
+    }
+
     # ---- Quality search (shared by the Analysis tab and the "Quality target" encode mode) ----
     function Format-Num([double]$v, [string]$f = '0.0') { $v.ToString($f, [System.Globalization.CultureInfo]::InvariantCulture) }
 
@@ -882,19 +948,6 @@ $WorkerScript = {
                 "-VideoKeys:FocalLengthIn35mmFormat<FocalLengthIn35mmFormat",
                 "-VideoKeys:CameraFocalLength35mmEquivalent<FocalLengthIn35mmFormat",
 
-                # Fuji Film Simulations & Color
-                "-Keys:FilmSimulation<FilmMode",
-                "-Keys:DynamicRange<DynamicRangeSetting",
-                "-Keys:WhiteBalance<WhiteBalance",
-                "-Keys:HighlightTone<HighlightTone",
-                "-Keys:ShadowTone<ShadowTone",
-
-                # Focus & Hardware Status
-                "-Keys:FocusMode<FocusMode",
-                "-Keys:ImageStabilization<ImageStabilization",
-                "-Keys:CameraSerialNumber<InternalSerialNumber",
-                "-Keys:LensSerialNumber<LensSerialNumber",
-
                 # Extended GPS Data
                 "-GPSAltitude<GPSAltitude",
                 "-GPSAltitudeRef<GPSAltitudeRef",
@@ -910,7 +963,20 @@ $WorkerScript = {
 
                 "-overwrite_original"
             )
-            $null = Invoke-Hidden 'exiftool' ($exifArgs1 + $outPath)
+
+            # Camera picture settings as this app's own Keys, and the look as readable text where players and
+            # file browsers show a description or comment. Explorer shows the comment of an .MP4 only when it has
+            # no Keys:Description, so that one is MOV only (Explorer shows no comments for .MOV at all).
+            $cam = Get-CameraSettings $file
+            foreach ($k in $cam.Settings.Keys) { $exifArgs1 += "-Keys:$(Get-CameraKeyTag $k)=$($cam.Settings[$k])" }
+            if ($cam.Look) {
+                $lookTags = @('ItemList:Comment', 'UserData:Comment', 'XMP-dc:Description')
+                if ([IO.Path]::GetExtension($outPath) -ne '.mp4') { $lookTags += 'Keys:Description' }
+                foreach ($t in $lookTags) { $exifArgs1 += "-$t=$($cam.Look)" }
+            }
+            if ($cam.Settings.Count) { Log ("${nameOnly}: camera settings " + (($cam.Settings.Keys | ForEach-Object { "$_=$($cam.Settings[$_])" }) -join '; ')) }
+
+            $null = Invoke-Hidden 'exiftool' (@('-config', (Get-ExifToolConfig)) + $exifArgs1 + $outPath)
             if ($LASTEXITCODE -ne 0) { Log "${nameOnly}: ExifTool pass 1 failed. Skipping advanced metadata." }
             else { Log "${nameOnly}: core metadata copied." }
 
